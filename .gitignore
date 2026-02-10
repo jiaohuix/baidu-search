@@ -1,0 +1,83 @@
+# -----------------------------
+# Python cache / bytecode
+# -----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# -----------------------------
+# Virtual environment
+# -----------------------------
+.venv/
+env/
+venv/
+ENV/
+outputs/
+
+# -----------------------------
+# Specific directories
+# -----------------------------
+/ui/      
+logs/
+*.log
+tmp/
+
+# -----------------------------
+# Environment variables
+# -----------------------------
+# .env
+.env.local
+.env.*.local
+
+# -----------------------------
+# IDE / editor
+# -----------------------------
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# -----------------------------
+# OS generated
+# -----------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -----------------------------
+# Logs
+# -----------------------------
+*.log
+logs/
+
+# -----------------------------
+# Python packaging
+# -----------------------------
+*.egg-info/
+dist/
+build/
+*.egg
+
+# -----------------------------
+# Jupyter / IPython
+# -----------------------------
+.ipynb_checkpoints
+*.ipynb
+
+# -----------------------------
+# Misc / temporary
+# -----------------------------
+*.tmp
+*.bak
+*.swp
+*.swo
+*.out
+*.lock
+
+# -----------------------------
+# Recursive hidden folders
+# -----------------------------
+**/.vscode/
+**/.venv/
+**/__pycache__/
+**/*.db
