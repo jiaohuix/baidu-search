@@ -3,16 +3,22 @@
 @author: jiaohuix
 @description: baidu搜索
 '''
+
 import re
 import asyncio
 import logging
+import random
 from enum import Enum
 from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+# from agno.tools import tool
 
 logger = logging.getLogger(__name__)
+
+NOISE_PATTERNS  = r"高清视频|在线观看|实时回复|淘宝"
+BANED_SITES = ["www.taobao.com"]
 
 class UrlResolveStatus(str, Enum):
     SKIPPED = "skipped"      # 不需要解析
@@ -58,24 +64,35 @@ class ContentFilter:
         return res
 
 
-class BaiduSearch:
+class BaiduSearchPro:
     """Baidu Search."""
+    _UA_LIST = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    ]
+
     def __init__(self, config: dict = None) -> None:
         self.url = "https://www.baidu.com/s"
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Referer": "https://www.baidu.com/"
-        }
         config = config or {}
         search_banned_sites = config.get("search_banned_sites", [])
         search_noise_patterns = config.get("search_noise_patterns", "")
         self.content_filter = ContentFilter(search_banned_sites, search_noise_patterns)
         self.max_results = config.get("max_results", 100)
 
+    def _random_headers(self):
+        return {
+            "User-Agent": random.choice(self._UA_LIST),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://www.baidu.com/",
+            "Connection": "keep-alive",
+        }
 
+    # @tool
     async def search(self, query: str, num_results: int = 5) -> str:
-        """standard search interface."""
+        """搜索百度并返回结果"""
         res = await self.search_baidu(query, num_results = min(2*num_results,  self.max_results))
 
         # filter
@@ -114,29 +131,42 @@ class BaiduSearch:
         """
         # 计算需要抓取的页数 (每页10条)
         pages_needed = (num_results // 10) + (1 if num_results % 10 != 0 else 0)
-        
-        async with httpx.AsyncClient(headers=self.headers, http2=True) as client:
-            # 第一阶段：并发请求所有列表页
-            fetch_tasks = [self.fetch_page(client, query, i) for i in range(pages_needed)]
-            pages_data = await asyncio.gather(*fetch_tasks)
-            
-            results = [item for page in pages_data for item in page]
-            
-            # 第二阶段：并发获取所有真实地址
-            url_tasks = [self.get_real_url(client, item["url"]) for item in results]
-            real_urls = await asyncio.gather(*url_tasks)
 
-            results_cleaned = []
-            for item, (url, status) in zip(results, real_urls):
+        # 关闭 http2 减少 TLS 指纹特征；不在 client 级别设 headers，每次请求单独带
+        async with httpx.AsyncClient(http2=False) as client:
+            # ① 预热：先访问首页拿 BAIDUID cookie，模拟真实浏览器行为
+            try:
+                await client.get("https://www.baidu.com/", headers=self._random_headers(), timeout=5.0)
+            except Exception:
+                pass
+
+            # ② 串行翻页，模拟人类逐页浏览（不再 gather 并发）
+            results = []
+            for i in range(pages_needed):
+                if i > 0:
+                    await asyncio.sleep(random.uniform(1.5, 3.5))
+                page_data = await self.fetch_page(client, query, i)
+                if not page_data:
+                    break  # 被拦截或无结果，停止翻页
+                results.extend(page_data)
+
+            # ③ 串行解析真实 URL，每个之间加微小间隔
+            for item in results:
+                url, status = await self.get_real_url(client, item["url"])
                 item["url"] = url
                 item["url_status"] = status.value
 
-                if status == UrlResolveStatus.FAILED:
-                    continue
-                results_cleaned.append(item)
+            # ④ 安全降级：URL 解析失败时，只要原始链接可用就保留
+            results_cleaned = [
+                item for item in results
+                if item["url_status"] != UrlResolveStatus.FAILED.value
+                or item["url"].startswith("http")
+            ]
 
-            if len(results_cleaned) == 0:
-                logger.warning(f"No results found from Baidu search: {query}")
+            if not results_cleaned:
+                # 兜底：如果全部 FAILED，返回原始结果而非空列表
+                logger.warning(f"All URL resolves failed for: {query}, returning raw results")
+                results_cleaned = results
 
             return {"data": results_cleaned}
 
@@ -150,7 +180,8 @@ class BaiduSearch:
             return url, UrlResolveStatus.SKIPPED
 
         try:
-            resp = await client.head(url, follow_redirects=False, timeout=2.0)
+            await asyncio.sleep(random.uniform(0.1, 0.3))
+            resp = await client.head(url, headers=self._random_headers(), follow_redirects=False, timeout=3.0)
             location = resp.headers.get("Location")
             if location:
                 return location, UrlResolveStatus.RESOLVED
@@ -201,7 +232,13 @@ class BaiduSearch:
         """单页请求任务"""
         url = f"https://www.baidu.com/s?wd={keyword}&pn={page_idx * 10}&ie=utf-8"
         try:
-            resp = await client.get(url, timeout=5.0)
+            resp = await client.get(url, headers=self._random_headers(), timeout=10.0)
+
+            # 检测验证码拦截
+            if "百度安全验证" in resp.text:
+                logger.warning(f"触发百度安全验证，第 {page_idx} 页抓取中止")
+                return []
+
             soup = BeautifulSoup(resp.text, "lxml")
             containers = soup.select(".c-container")
             
@@ -227,3 +264,30 @@ class BaiduSearch:
         except:
             return []
 
+
+async def main():
+
+    config = {
+        "search_noise_patterns": NOISE_PATTERNS,
+        "search_banned_sites": BANED_SITES
+    }
+    searcher = BaiduSearchPro(config)
+    keyword = "强化学习"
+    print(f"开始抓取关键词: {keyword} ...")
+    results = await searcher.search(keyword, num_results=5)
+    print(results)
+    
+    # results = await searcher.search_baidu(keyword, num_results=40)
+    # for item in results["data"]:
+    #     # print(item)
+    #     print(f"[{item['rank']}] {item['title']}")
+    #     print(f"来源/地址: {item['url']}")
+    #     print(f"内容摘要: {item['abstract']}")
+    #     print("-" * 40)
+
+
+
+# 测试
+if __name__ == "__main__":
+    asyncio.run(main())
+    
