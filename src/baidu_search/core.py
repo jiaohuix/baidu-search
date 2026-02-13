@@ -334,9 +334,14 @@ class BaiduSearch:
 
     async def fetch_page(self, client, keyword, page_idx):
         """单页请求（纯逻辑，不含限速）。返回 None 表示被拦截，[] 表示解析异常。"""
-        url = f"https://www.baidu.com/s?wd={keyword}&pn={page_idx * 10}&ie=utf-8"
+
+        params =    {
+            "wd": keyword,
+            "pn": page_idx * 10,
+            "ie": "utf-8",
+        }
         try:
-            resp = await client.get(url, timeout=5.0)
+            resp = await client.get(self.url, params=params, timeout=5.0)
 
             # 检测验证码拦截 → 返回 None 触发上层重试
             if "百度安全验证" in resp.text:
