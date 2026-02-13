@@ -22,3 +22,9 @@ async def main():
 asyncio.run(main())
 ```
 
+
+🌐 浏览器抓取能力
+```
+uv sync --extra crawl4ai
+playwright install
+```
