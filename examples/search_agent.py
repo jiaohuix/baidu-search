@@ -16,7 +16,7 @@ llm = OpenAILike(id=MODEL_NAME, api_key=API_KEY, base_url=API_URL,
 
 
 system_prompt = '''
-YYou are a helpful assistant.
+You are a helpful assistant.
 
 You can use the MCP tools to:
 - search the web
