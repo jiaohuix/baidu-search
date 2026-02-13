@@ -1,9 +1,16 @@
-# 📡 Baidu Search — 异步百度搜索抓取 & 文本压缩工具
+# 📡 baidu-search — 异步百度搜索 + 页面提取 + 上下文压缩工具
 
-**`baidu-search`** 是一个 Python 库，提供异步百度搜索抓取 + 文本压缩能力。
-它可以在 Python 程序中执行百度搜索、抓取网页正文，并用 **ContextCompressor** 对长文本进行压缩，保留与查询最相关的内容。
-✨ 目标是简洁、易用，适合开发者快速集成搜索与文本处理流程。
+**baidu-search** 是一个轻量级的 Python 异步工具包，专注于：
 
+- 通过百度搜索获取结果列表（标题、链接、摘要）
+- 提取搜索结果页面的正文内容（支持 requests 和浏览器两种后端）
+- 使用 **BM25** 算法对长文本进行智能压缩，保留与查询最相关的内容
+- 内置简单缓存，减少重复请求
+
+适合快速构建中文搜索工具，尤其适用于 **LLM Agent** 的 search tool、RAG 流程、数据采集等场景。
+
+当前版本（dev 分支）：v0.5.0  
+还在积极迭代中 ⚙️
 ---
 
 ## 🚀 核心特性
@@ -44,7 +51,7 @@ from baidu_search import BaiduSearch
 
 async def main():
     searcher = BaiduSearch()
-    results = await searcher.search("你的关键词", num_results=5)
+    results = await searcher.search("强化学习", num_results=5)
     print(results)
 
 asyncio.run(main())
