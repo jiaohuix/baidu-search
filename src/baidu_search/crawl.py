@@ -11,7 +11,6 @@ CrawlEngine - 统一网页抓取引擎
     text = await engine.crawl(url)
 TODO:
 1 像search一样添加cache
-2 
 """
 
 import os
@@ -21,6 +20,8 @@ import logging
 from typing import Optional
 
 import requests as sync_requests
+
+from baidu_search.cache import get_crawl_cache
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,15 @@ class CrawlEngine:
     # ── 主入口 ──
     async def crawl(self, url: str) -> Optional[str]:
         """按 level 逐级尝试抓取，返回 markdown 文本或 None"""
+        # ── 查缓存 ──
+        cache = get_crawl_cache()
+        cache_key = f"crawl:{url}"
+        cached = await cache.get(cache_key)
+        if cached is not None:
+            logger.info(f"[crawl][cache hit] {url[:80]}")
+            return cached
+
+        # ── 逐级尝试 ──
         backends = self._build_chain()
         attempted = []
 
@@ -160,7 +170,10 @@ class CrawlEngine:
                 elapsed = time.time() - start
                 if text:
                     logger.info(f"[crawl] {name} 成功: {url[:80]} | ✓ | ⏱: {elapsed:.2f}s")
-                    return text[:self.max_chars]
+                    result = text[:self.max_chars]
+                    # ── 写缓存 ──
+                    await cache.set(cache_key, result)
+                    return result
                 else:
                     logger.warning(f"[crawl] {name} 未获取有效内容 | ✗ | ⏱: {elapsed:.2f}s")
             except Exception as e:
@@ -235,10 +248,10 @@ async def main():
     print(f"可用后端: {engine.available_backends()}")
 
     url = "https://www.dayi.org.cn/qa/286155.html"
-    url = "https://zhuanlan.zhihu.com/p/56592867"
+    url = "https://zhuanlan.zhihu.com/p/56592867" # 动态
     text = await engine.crawl(url)
     if text:
-        print(text[:2000])
+        print(text)
     else:
         print("抓取失败")
 
