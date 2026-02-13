@@ -10,7 +10,11 @@ CrawlEngine - 统一网页抓取引擎
     engine = CrawlEngine(level=1)
     text = await engine.crawl(url)
 TODO:
-1 像search一样添加cache
+1 像search一样添加cache √
+2 异步与同步混用改掉
+_crawl_requests 用的是同步 sync_requests.get，但 crawl() 是 async，可能导致线程阻塞。
+
+可以考虑用 httpx.AsyncClient 或 aiohttp 完全异步化。
 """
 
 import os

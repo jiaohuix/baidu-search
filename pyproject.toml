@@ -34,6 +34,12 @@ markdown = [
     "markdownify>=1.2.2"
 ]
 
+compress = [
+    "jieba",
+    "rank-bm25",
+    "regex",
+]
+
 crawl4ai = [
     "playwright",
     "crawl4ai"
