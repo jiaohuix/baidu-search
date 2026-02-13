@@ -49,6 +49,7 @@ desktop.ini
 # -----------------------------
 *.log
 logs/
+ref_codes/
 
 # -----------------------------
 # Python packaging

@@ -29,6 +29,8 @@ import httpx
 from aiolimiter import AsyncLimiter
 from bs4 import BeautifulSoup
 
+from baidu_search.cache import async_cache, get_search_cache, get_url_cache
+
 logger = logging.getLogger(__name__)
 
 NOISE_PATTERNS  = r"高清视频|在线观看|实时回复|精选笔记|淘宝"
@@ -164,7 +166,15 @@ class BaiduSearch:
     async def search_baidu(self, query, num_results=10):
         """百度搜索主流程。
         思路：sem + qps 两层控制即可，低频调用零等待，高频自动排队。
+        缓存：query + num_results 级别，命中直接返回。
         """
+        # ── query 级缓存 ──
+        cache_key = f"search:{query}:{num_results}"
+        cached = await get_search_cache().get(cache_key)
+        if cached is not None:
+            logger.info(f"[cache hit] search_baidu: {query!r}")
+            return cached
+
         pages_needed = (num_results + 9) // 10
         t0 = time.time()
 
@@ -201,7 +211,11 @@ class BaiduSearch:
                 cleaned = results
 
             logger.info(f"[计时] 总耗时 {t3-t0:.2f}s，返回 {len(cleaned)} 条")
-            return {"data": cleaned}
+            result = {"data": cleaned}
+
+            # ── 写入 query 级缓存 ──
+            await get_search_cache().set(cache_key, result)
+            return result
 
     # ── 搜索页：并发抓取 ─────────────────────────────────────
     async def _fetch_pages_concurrent(self, client, query, pages_needed):
@@ -274,7 +288,9 @@ class BaiduSearch:
 
 
     async def get_real_url(self, client, url):
-        """解析百度跳转链接，获取真实 URL（纯逻辑，不含限速）。"""
+        """解析百度跳转链接，获取真实 URL（纯逻辑，不含限速）。
+        URL 级缓存：同一个 302 链接只解析一次，24h 有效。
+        """
         if not url:
             return url, UrlResolveStatus.SKIPPED
 
@@ -282,12 +298,20 @@ class BaiduSearch:
         if not ("link?url=" in url or "baidu.php" in url):
             return url, UrlResolveStatus.SKIPPED
 
+        # ── URL 级缓存 ──
+        _url_cache = get_url_cache()
+        cached = await _url_cache.get(url)
+        if cached is not None:
+            logger.debug(f"[cache hit] url resolve: {url[:80]}")
+            return cached["url"], UrlResolveStatus(cached["status"])
+
         try:
             resp = await client.head(
                 url, follow_redirects=False, timeout=2.0,
             )
             location = resp.headers.get("Location")
             if location:
+                await _url_cache.set(url, {"url": location, "status": UrlResolveStatus.RESOLVED.value})
                 return location, UrlResolveStatus.RESOLVED
             return url, UrlResolveStatus.FAILED
         except Exception as e:
@@ -334,9 +358,14 @@ class BaiduSearch:
 
     async def fetch_page(self, client, keyword, page_idx):
         """单页请求（纯逻辑，不含限速）。返回 None 表示被拦截，[] 表示解析异常。"""
-        url = f"https://www.baidu.com/s?wd={keyword}&pn={page_idx * 10}&ie=utf-8"
+
+        params =    {
+            "wd": keyword,
+            "pn": page_idx * 10,
+            "ie": "utf-8",
+        }
         try:
-            resp = await client.get(url, timeout=5.0)
+            resp = await client.get(self.url, params=params, timeout=5.0)
 
             # 检测验证码拦截 → 返回 None 触发上层重试
             if "百度安全验证" in resp.text:
