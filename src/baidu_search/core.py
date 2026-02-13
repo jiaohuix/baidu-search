@@ -1,18 +1,38 @@
-'''
-@date: 2026/02/11
+"""
+@date: 2026/02/13
 @author: jiaohuix
-@description: baidu搜索
-'''
+@description: BaiduSearch - 异步百度搜索模块
+
+已实现：
+1. 多页并发搜索（asyncio + httpx）
+2. 并发控制（Semaphore + QPS limiter）
+3. 抖动 + 指数退避 + 全局冷却（抗风控）
+4. 百度 302 跳转解析（可关闭）
+5. URL 去重、噪声过滤、snip提取与清洗
+6. 摘要提取与清洗
+
+TODO：
+1. 网页正文抓取（进入真实 URL 抓取 HTML，主内容提取）
+2. 查询结果缓存（query 级 / url 级，支持 TTL）
+3. 关键片段摘取（BM25 / 语义重排）
+"""
+
 import re
 import asyncio
 import logging
+import random
+import time
 from enum import Enum
 from urllib.parse import urlparse
 
 import httpx
+from aiolimiter import AsyncLimiter
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
+
+NOISE_PATTERNS  = r"高清视频|在线观看|实时回复|精选笔记|淘宝"
+BANED_SITES = ["www.taobao.com"]
 
 class UrlResolveStatus(str, Enum):
     SKIPPED = "skipped"      # 不需要解析
@@ -58,25 +78,71 @@ class ContentFilter:
         return res
 
 
+# ── 默认并发配置 ──────────────────────────────────────────
+# 可通过 config["concurrency"] 覆盖，方便调试
+DEFAULT_CONCURRENCY = {
+    # 百度搜索页
+    "search_sem": 2,          # 同时最多几个搜索页在飞
+    "search_qps": 0.5,          # 每秒最多发几个搜索页请求
+    "search_jitter": (0.05, 0.15),  # 搜索页请求前的随机抖动(秒)
+    # link 解析 (302)：轻量 HEAD
+    "resolve_sem": 15,        # 同时最多几个解析在飞 【速度瓶颈在url解析这】
+    "resolve_qps": 10,        # 每秒最多发几个解析请求 resolve_qps = min(10, search_qps * 10)
+    "resolve_jitter": (0.02, 0.08), # URL 解析请求前的随机抖动(秒)
+    # 重试（仅搜索页）
+    "max_retries": 2,
+    "retry_backoff": 3.0,
+    "resolve_real_url": True,
+    # "resolve_real_url": False,
+}
+
+
 class BaiduSearch:
-    """Baidu Search."""
+    """百度搜索 + sem/qps 保护。"""
+    # 固定 headers，跟 core.py 保持一致（同连接内 UA 不变，更像真实浏览器）
+    _HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;"
+                  "q=0.9,image/webp,*/*;q=0.8",
+        "Referer": "https://www.baidu.com/",
+    }
+
     def __init__(self, config: dict = None) -> None:
         self.url = "https://www.baidu.com/s"
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Referer": "https://www.baidu.com/"
-        }
         config = config or {}
         search_banned_sites = config.get("search_banned_sites", [])
         search_noise_patterns = config.get("search_noise_patterns", "")
         self.content_filter = ContentFilter(search_banned_sites, search_noise_patterns)
         self.max_results = config.get("max_results", 100)
 
+        # ── 并发参数（可通过 config["concurrency"] 覆盖） ──
+        cc = {**DEFAULT_CONCURRENCY, **config.get("concurrency", {})}
+        self._cc = cc
+        # 搜索页并发控制
+        self._search_sem = asyncio.Semaphore(cc["search_sem"])
+        self._search_qps = self._make_limiter(cc["search_qps"])
+        # link 解析并发控制
+        self._resolve_sem = asyncio.Semaphore(cc["resolve_sem"])
+        self._resolve_qps = self._make_limiter(cc["resolve_qps"])
+        self._cooldown_until = 0
+        # 是否解析真实url
+        self.resolve_real_url = cc.get("resolve_real_url", True)
+
+    @staticmethod
+    def _make_limiter(qps: float) -> AsyncLimiter:
+        """构造 AsyncLimiter，确保 max_rate >= 1 以避免 acquire 报错。
+        例如 qps=0.33 → AsyncLimiter(1, 1/0.33≈3.03)，即 3 秒 1 次。
+        """
+        if qps >= 1:
+            return AsyncLimiter(qps, 1)
+        else:
+            # 反转：1 次 / (1/qps) 秒
+            return AsyncLimiter(1, 1.0 / qps)
 
     async def search(self, query: str, num_results: int = 5) -> str:
-        """standard search interface."""
-        res = await self.search_baidu(query, num_results = min(2*num_results,  self.max_results))
+        """搜索百度并返回结果"""
+        res = await self.search_baidu(query, num_results=num_results)
 
         # filter
         if self.content_filter:
@@ -90,77 +156,146 @@ class BaiduSearch:
             formatted_results.append(f"{i}. {r['title']} ({r['url']})")
             if "abstract" in r:
                 formatted_results[-1] += f"\nAbstract: {r['abstract']}"
-                # formatted_results[-1] += f"\nAbstract: {r['abstract']}\n{r['url_status']}"
 
         msg = "\n".join(formatted_results)
         return msg
 
 
     async def search_baidu(self, query, num_results=10):
-        """Search Baidu using web scraping to retrieve relevant search results.
-
-        - WARNING: Uses web scraping which may be subject to rate limiting or anti-bot measures.
-
-        Returns:
-            Example result:
-            {
-                'rank': 1,
-                'title': '百度百科',
-                'abstract': '百度百科是一部内容开放、自由的网络百科全书...',
-                'url': 'https://baike.baidu.com/',
-                'url_status': 'resolved'
-            }
-            
+        """百度搜索主流程。
+        思路：sem + qps 两层控制即可，低频调用零等待，高频自动排队。
         """
-        # 计算需要抓取的页数 (每页10条)
-        pages_needed = (num_results // 10) + (1 if num_results % 10 != 0 else 0)
-        
-        async with httpx.AsyncClient(headers=self.headers, http2=True) as client:
-            # 第一阶段：并发请求所有列表页
-            fetch_tasks = [self.fetch_page(client, query, i) for i in range(pages_needed)]
-            pages_data = await asyncio.gather(*fetch_tasks)
-            
-            results = [item for page in pages_data for item in page]
-            
-            # 第二阶段：并发获取所有真实地址
-            url_tasks = [self.get_real_url(client, item["url"]) for item in results]
-            real_urls = await asyncio.gather(*url_tasks)
+        pages_needed = (num_results + 9) // 10
+        t0 = time.time()
 
-            results_cleaned = []
-            for item, (url, status) in zip(results, real_urls):
-                item["url"] = url
-                item["url_status"] = status.value
+        # http2=True + 固定 headers 在 client 级别
+        async with httpx.AsyncClient(headers=self._HEADERS, http2=True) as client:
+            t1 = time.time()
+            logger.info(f"[计时] 初始化 {t1-t0:.2f}s")
 
-                if status == UrlResolveStatus.FAILED:
-                    continue
-                results_cleaned.append(item)
+            # ② 搜索页：gather 并发，sem + qps 自动限速
+            results = await self._fetch_pages_concurrent(client, query, pages_needed)
+            t2 = time.time()
+            logger.info(f"[计时] 搜索页 {pages_needed} 页 → {len(results)} 条，{t2-t1:.2f}s")
 
-            if len(results_cleaned) == 0:
-                logger.warning(f"No results found from Baidu search: {query}")
+            # ③ link 解析：gather 并发，sem + qps 自动限速
+            if self.resolve_real_url:
+                await self._resolve_urls_concurrent(client, results)
+                t3 = time.time()
+                logger.info(f"[计时] URL 解析 {len(results)} 条，{t3-t2:.2f}s")
+            else:
+                # 标记为跳过解析
+                for item in results:
+                    item["url_status"] = UrlResolveStatus.SKIPPED.value
+                t3 = time.time()
+                logger.info(f"[计时] URL 解析已关闭")
 
-            return {"data": results_cleaned}
+            # ④ 降级保留
+            cleaned = [
+                item for item in results
+                if item.get("url_status") != UrlResolveStatus.FAILED.value
+                or item.get("url", "").startswith("http")
+            ]
+            if not cleaned:
+                logger.warning(f"URL 全部解析失败: {query}，返回原始结果")
+                cleaned = results
+
+            logger.info(f"[计时] 总耗时 {t3-t0:.2f}s，返回 {len(cleaned)} 条")
+            return {"data": cleaned}
+
+    # ── 搜索页：并发抓取 ─────────────────────────────────────
+    async def _fetch_pages_concurrent(self, client, query, pages_needed):
+        """所有页 gather 并发，由 sem + qps 自动控制节奏。"""
+        tasks = [
+            asyncio.create_task(self._fetch_page_throttled(client, query, i))
+            for i in range(pages_needed)
+        ]
+        pages = await asyncio.gather(*tasks)
+        # 合并结果，跳过被拦截的页（None）
+        results = []
+        for page in pages:
+            if page is not None:
+                results.extend(page)
+        return results
+
+    async def _fetch_page_throttled(self, client, query, page_idx):
+        """单页请求：抖动 + sem + qps 限速，被拦截时 backoff 重试。"""
+        max_retries = self._cc["max_retries"]
+        backoff = self._cc["retry_backoff"]
+        jitter = self._cc["search_jitter"]
+
+        for attempt in range(1 + max_retries):
+
+            # 👇 每次尝试前检查冷却
+            now = time.time()
+            wait = max(0, self._cooldown_until - now)
+            if wait > 0:
+                logger.warning(f"全局冷却中，等待 {wait:.1f}s")
+                await asyncio.sleep(wait)
+
+            # 抖动：让同批 task 错开到达
+            await asyncio.sleep(random.uniform(*jitter))
+            async with self._search_qps:
+                async with self._search_sem:
+                    data = await self.fetch_page(client, query, page_idx)
+            if data is not None:
+                return data
+            # 被拦截，backoff 重试
+            if attempt < max_retries:
+                # wait = backoff * (attempt + 1) # 线性退避
+                wait = backoff * (2 ** attempt) # 指数退避
+                logger.warning(
+                    f"搜索页 {page_idx} 被拦截，{wait:.1f}s 后重试 "
+                    f"({attempt+1}/{max_retries})"
+                )
+                await asyncio.sleep(wait)
+        return None  # 重试耗尽
+
+    # ── link 解析：并发解析 ──────────────────────────────────
+    async def _resolve_urls_concurrent(self, client, results):
+        """所有 URL gather 并发，由 sem + qps 自动控制节奏。"""
+        tasks = [
+            asyncio.create_task(self._resolve_one(client, item))
+            for item in results
+        ]
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    async def _resolve_one(self, client, item):
+        """单条 URL 解析：抖动 + sem + qps 限速，不重试。"""
+        jitter = self._cc["resolve_jitter"]
+        # 抖动：让同批 task 错开到达
+        await asyncio.sleep(random.uniform(*jitter))
+        async with self._resolve_qps:
+            async with self._resolve_sem:
+                url, status = await self.get_real_url(client, item["url"])
+        item["url"] = url
+        item["url_status"] = status.value
 
 
     async def get_real_url(self, client, url):
+        """解析百度跳转链接，获取真实 URL（纯逻辑，不含限速）。"""
         if not url:
             return url, UrlResolveStatus.SKIPPED
 
-        # 只跳过非跳转 URL
+        # 非跳转 URL 直接跳过
         if not ("link?url=" in url or "baidu.php" in url):
             return url, UrlResolveStatus.SKIPPED
 
         try:
-            resp = await client.head(url, follow_redirects=False, timeout=2.0)
+            resp = await client.head(
+                url, follow_redirects=False, timeout=2.0,
+            )
             location = resp.headers.get("Location")
             if location:
                 return location, UrlResolveStatus.RESOLVED
-            else:
-                return url, UrlResolveStatus.FAILED
-        except Exception:
+            return url, UrlResolveStatus.FAILED
+        except Exception as e:
+            logger.exception(f"fetch_page 异常: {e}")
             return url, UrlResolveStatus.FAILED
 
     def clean_abstract(self, text):
-        """精准清洗：只去掉乱码和冗余换行"""
+        """清洗乱码和冗余换行"""
         if not text: return ""
         
         # 1. 去掉特殊的编码字符（如 \ue680, \ue67d 等百度图标字体）
@@ -198,10 +333,19 @@ class BaiduSearch:
         return ""
 
     async def fetch_page(self, client, keyword, page_idx):
-        """单页请求任务"""
+        """单页请求（纯逻辑，不含限速）。返回 None 表示被拦截，[] 表示解析异常。"""
         url = f"https://www.baidu.com/s?wd={keyword}&pn={page_idx * 10}&ie=utf-8"
         try:
             resp = await client.get(url, timeout=5.0)
+
+            # 检测验证码拦截 → 返回 None 触发上层重试
+            if "百度安全验证" in resp.text:
+                logger.warning(f"触发百度安全验证，第 {page_idx} 页")
+
+                # 设置全局冷却 30 秒
+                self._cooldown_until = time.time() + 30
+                return None
+
             soup = BeautifulSoup(resp.text, "lxml")
             containers = soup.select(".c-container")
             
@@ -224,6 +368,51 @@ class BaiduSearch:
                     "url": raw_url
                 })
             return page_items
-        except:
+        except Exception as e:
+            logger.exception(f"fetch_page 异常: {e}")
             return []
+    
 
+
+async def main():
+
+    config = {
+        "search_noise_patterns": NOISE_PATTERNS,
+        "search_banned_sites": BANED_SITES,
+        "concurrency": {
+            # 搜索页
+            "search_sem": 2,
+            "search_qps": 0.5,
+            "search_jitter": (0.05, 0.15),
+
+            # URL 解析
+            "resolve_sem": 15,
+            "resolve_qps": 10,
+            "resolve_jitter": (0.02, 0.08),
+
+            # 重试
+            "max_retries": 2,
+            "retry_backoff": 3.0,
+
+            # 是否解析真实 URL
+            "resolve_real_url": True,
+        }
+    }
+    searcher = BaiduSearch(config)
+    keyword = "强化学习"
+    print(f"开始抓取关键词: {keyword} ...")
+    # results = await searcher.search(keyword, num_results=10)
+    # print(results)
+    
+    results = await searcher.search_baidu(keyword, num_results=10)
+    for item in results["data"]:
+        print(f"[{item['rank']}] {item['title']}")
+        print(f"来源/地址: {item['url']}")
+        print(f"内容摘要: {item['abstract']}")
+        print("-" * 40)
+
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+   
