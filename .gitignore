@@ -13,6 +13,7 @@ env/
 venv/
 ENV/
 outputs/
+.cache/
 
 # -----------------------------
 # Specific directories

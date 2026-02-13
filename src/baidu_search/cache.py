@@ -132,7 +132,7 @@ def make_cache_key(*args, **kwargs) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-# ── 全局缓存实例（模块级单例） ─────────────────────────────  
+# ── 全局缓存实例（模块级单例） ─────────────────────────────
 # 查询级：1h
 _search_cache = AsyncCacheManager(
     default_ttl=3600,
@@ -142,6 +142,11 @@ _search_cache = AsyncCacheManager(
 _url_cache = AsyncCacheManager(
     default_ttl=86400,
     db_path=".cache/url.db"
+)
+# 网页抓取级：7d（crawl 代价大，缓存久一些）
+_crawl_cache = AsyncCacheManager(
+    default_ttl=86400 * 7,
+    db_path=".cache/crawl.db"
 )
 
 
@@ -188,4 +193,7 @@ def get_search_cache() -> AsyncCacheManager:
 
 def get_url_cache() -> AsyncCacheManager:
     return _url_cache
+
+def get_crawl_cache() -> AsyncCacheManager:
+    return _crawl_cache
 
