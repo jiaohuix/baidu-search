@@ -1,62 +1,116 @@
 """
-MCP Server for baidu-search project
-- 使用 HTTP transport
-- 支持自定义端口
-- 三工具：
-  1. 百度搜索
-  2. 页面抓取
-  3. 文本摘要（使用 ContextCompressor）
+MCP Server for baidu-search 
+增强版：鲁棒抓取，所有工具失败时返回 error JSON
 """
 
 import os
+import json
 import argparse
+from typing import List, Literal
+
 from fastmcp import FastMCP
-from typing import List
-from pydantic import Field
-
-# 引入你的项目模块
 from baidu_search import BaiduSearch, CrawlEngine, ContextCompressor
-# from baidu_search.engine import CrawlEngine
-# from baidu_search.compressor import ContextCompressor
 
-# --- 初始化 MCP ---
-mcp = FastMCP(
-    name="baidu_search_mcp",
-)
 
-# --- 初始化搜索和抓取 ---
+mcp = FastMCP(name="baidu_search_mcp")
 searcher = BaiduSearch()
 crawl_engine = CrawlEngine()
 
-# --- Tool 1: 百度搜索 ---
-@mcp.tool(name="search_baidu", description="在百度上进行网页搜索并返回结构化结果")
-async def search_baidu(
-    query: str = Field(description="搜索关键词"),
-    num_results: int = Field(default=5, description="返回结果数量")
-) -> List[dict]:
-    results = await searcher.search(query, num_results=num_results)
-    return results
 
-# --- Tool 2: 页面抓取 ---
-@mcp.tool(name="fetch_page", description="抓取指定页面并提取正文")
-async def fetch_page(
-    url: str = Field(description="要抓取的网页链接")
+def err(msg: str) -> str:
+    """统一错误返回 JSON"""
+    return json.dumps({"error": msg}, ensure_ascii=False)
+
+
+@mcp.tool(name="search_baidu")
+async def search_baidu(query: str, num_results: int = 5) -> List[dict]:
+    """
+    功能：
+        在百度上搜索关键词，并返回结构化结果。
+
+    参数：
+        query: 搜索关键词
+        num_results: 返回结果数量，默认 5
+
+    返回：
+        JSON: 搜索结果
+    """
+    try:
+        return await searcher.search(query, num_results=num_results)
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool(name="fetch_content")
+async def fetch_content(
+    url: str,
+    mode: Literal["full", "head", "tail", "grep", "compress"] = "full",
+    n: int = 1000,
+    keyword: str = "",
+    query: str = ""
 ) -> str:
-    text = await crawl_engine.crawl(url)
-    return text
+    """
+    功能：
+        抓取网页正文，并根据模式处理内容，返回 JSON 字符串。
 
-# --- Tool 3: 摘要生成 ---
-# todo: 应该集成到内容获取，而不是让llm传入ctx然后压缩
-@mcp.tool(name="summarize_text", description="对文本生成摘要（使用 ContextCompressor）")
-async def summarize_text(
-    text: str = Field(description="需要摘要的文本"),
-    query: str = Field(default="", description="可选的查询上下文，用于 ContextCompressor"),
-    max_chars: int = Field(default=500, description="摘要最大字符数")
-) -> str:
-    compressor = ContextCompressor(max_chars=max_chars)
-    summary = compressor.compress(query=query, context=text)
+    参数：
+        url: 网页链接
+        mode: 操作模式，可选：
+            - full: 返回全文（截断至 n 字符）
+            - head: 返回前 n 字符
+            - tail: 返回后 n 字符
+            - grep: 返回包含 keyword 的段落，最多 n 字符
+            - compress: 使用 ContextCompressor 对文本进行 query-aware 压缩
+        n: 最大返回字符数
+        keyword: grep 模式下使用的关键词
+        query: compress 模式下使用的查询上下文
 
-    return summary
+    返回：
+        JSON 字符串：
+        {
+            "text": str,       # 返回的文本
+            "orig_len": int,   # 原始文本长度
+            "ret_len": int     # 返回文本长度
+        }
+        如果抓取或处理失败，则返回：
+        {"error": "错误信息"}
+    """
+    try:
+        text = await crawl_engine.crawl(url)
+    except Exception as e:
+        return err(f"crawl_failed: {e}")
+
+    if not text:
+        return err("empty_page")
+
+    if isinstance(text, bytes):
+        try:
+            text = text.decode("utf-8", "ignore")
+        except Exception:
+            return err("decode_failed")
+
+    orig_len = len(text)
+
+    try:
+        if mode == "head":
+            result = text[:n]
+        elif mode == "tail":
+            result = text[-n:]
+        elif mode == "grep":
+            paras = text.split("\n")
+            hits = [p for p in paras if keyword in p]
+            result = "\n".join(hits)[:n]
+        elif mode == "compress":
+            compressor = ContextCompressor(max_chars=n)
+            result = compressor.compress(query=query, context=text)
+        else:  # full
+            result = text[:n]
+    except Exception as e:
+        return err(f"process_failed: {e}")
+
+    data = {"text": result, "orig_len": orig_len, "ret_len": len(result)}
+    return json.dumps(data, ensure_ascii=False)
+
 
 # --- 启动 MCP Server ---
 if __name__ == "__main__":
