@@ -1,6 +1,8 @@
 """
 MCP Server for baidu-search 
 增强版：鲁棒抓取，所有工具失败时返回 error JSON
+
+TODO: 缩略url信息和query信息，可以简化llm参数生成复杂度
 """
 
 import os
