@@ -16,7 +16,7 @@ from baidu_search import BaiduSearch, CrawlEngine, ContextCompressor
 
 mcp = FastMCP(name="baidu_search_mcp")
 searcher = BaiduSearch()
-crawl_engine = CrawlEngine()
+crawl_engine = CrawlEngine(level=2)
 
 
 def err(msg: str) -> str:
@@ -25,7 +25,7 @@ def err(msg: str) -> str:
 
 
 @mcp.tool(name="search_baidu")
-async def search_baidu(query: str, num_results: int = 5) -> List[dict]:
+async def search_baidu(query: str, num_results: int = 5) -> str:
     """
     功能：
         在百度上搜索关键词，并返回结构化结果。
@@ -38,9 +38,12 @@ async def search_baidu(query: str, num_results: int = 5) -> List[dict]:
         JSON: 搜索结果
     """
     try:
-        return await searcher.search(query, num_results=num_results)
+        result = await searcher.search(query, num_results=num_results)
+        if not result:
+            return err("search no_results")
+        return json.dumps({"text": result}, ensure_ascii=False)
     except Exception as e:
-        return [{"error": str(e)}]
+        return err(f"search_failed: {e}")
 
 
 @mcp.tool(name="fetch_content")
