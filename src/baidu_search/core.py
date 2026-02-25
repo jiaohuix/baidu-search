@@ -18,6 +18,7 @@ TODO：
 """
 
 import re
+import json
 import asyncio
 import logging
 import random
@@ -153,14 +154,18 @@ class BaiduSearch:
             results = res["data"][:num_results]
 
         # format
-        formatted_results = []
-        for i, r in enumerate(results, 1):
-            formatted_results.append(f"{i}. {r['title']} ({r['url']})")
-            if "abstract" in r:
-                formatted_results[-1] += f"\nAbstract: {r['abstract']}"
+        # formatted_results = []
+        # for i, r in enumerate(results, 1):
+        #     formatted_results.append(f"{i}. {r['title']} ({r['url']})")
+        #     if "abstract" in r:
+        #         formatted_results[-1] += f"\nAbstract: {r['abstract']}"
 
-        msg = "\n".join(formatted_results)
-        return msg
+        # msg = "\n".join(formatted_results)
+        # return msg
+
+        for r in results:
+            r.pop("url_status", None)
+        return json.dumps(results, ensure_ascii=False)
 
 
     async def search_baidu(self, query, num_results=10):
@@ -430,8 +435,8 @@ async def main():
     searcher = BaiduSearch(config)
     keyword = "强化学习"
     print(f"开始抓取关键词: {keyword} ...")
-    # results = await searcher.search(keyword, num_results=10)
-    # print(results)
+    results = await searcher.search(keyword, num_results=10)
+    print(results)
     
     results = await searcher.search_baidu(keyword, num_results=10)
     for item in results["data"]:

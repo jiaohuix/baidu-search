@@ -41,7 +41,8 @@ async def search_baidu(query: str, num_results: int = 5) -> str:
         result = await searcher.search(query, num_results=num_results)
         if not result:
             return err("search no_results")
-        return json.dumps({"text": result}, ensure_ascii=False)
+        return result
+
     except Exception as e:
         return err(f"search_failed: {e}")
 
