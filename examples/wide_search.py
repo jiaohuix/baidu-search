@@ -12,7 +12,7 @@ from agno.models.openai import OpenAILike
 # 配置与模型初始化
 # ============================================================
 API_URL = "https://api.siliconflow.cn/v1"
-API_KEY = "sk-xuytewnxqbcczitcswbjkmcvfvpcgfiropkjrnjyhjliyaii"
+API_KEY = "sk-"
 MODEL_NAME = "Qwen/Qwen3-8B"
 MODEL_NAME = "deepseek-ai/DeepSeek-V3.2"
 llm = OpenAILike(id=MODEL_NAME, api_key=API_KEY, base_url=API_URL,

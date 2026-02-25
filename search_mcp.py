@@ -14,7 +14,7 @@ from fastmcp import FastMCP
 from baidu_search import BaiduSearch, CrawlEngine, ContextCompressor
 
 
-mcp = FastMCP(name="baidu_search_mcp")
+mcp = FastMCP(name="search_mcp")
 searcher = BaiduSearch()
 crawl_engine = CrawlEngine(level=2)
 
@@ -24,18 +24,18 @@ def err(msg: str) -> str:
     return json.dumps({"error": msg}, ensure_ascii=False)
 
 
-@mcp.tool(name="search_baidu")
+@mcp.tool(name="web_search")
 async def search_baidu(query: str, num_results: int = 5) -> str:
     """
     功能：
-        在百度上搜索关键词，并返回结构化结果。
+        Web 搜索工具，用于根据关键词在网络上检索相关信息。
 
     参数：
-        query: 搜索关键词
-        num_results: 返回结果数量，默认 5
+        query:str 搜索关键词
+        num_results:int 返回结果数量，默认 5
 
     返回：
-        JSON: 搜索结果
+        str (JSON 格式字符串): [{"rank":int,"title":str, "abstract":str, "url": str}]
     """
     try:
         result = await searcher.search(query, num_results=num_results)

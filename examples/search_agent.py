@@ -36,7 +36,7 @@ Always prioritize accuracy and cite information from the pages you accessed when
 db = SqliteDb(db_file="tmp/agents.db")
 
 async def main():
-    # Connect to your Baidu search MCP server
+    # Connect to your search MCP server
     mcp_tools = MCPTools(
         transport="streamable-http",
         url="http://127.0.0.1:8080/mcp"
