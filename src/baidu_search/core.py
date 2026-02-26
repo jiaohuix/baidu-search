@@ -34,8 +34,19 @@ from baidu_search.cache import async_cache, get_search_cache, get_url_cache
 
 logger = logging.getLogger(__name__)
 
-NOISE_PATTERNS  = r"高清视频|在线观看|实时回复|精选笔记|淘宝"
-BANED_SITES = ["www.taobao.com"]
+NOISE_PATTERNS = (
+    r"高清视频|在线观看|实时回复|精选笔记|"
+    r"点击(查看|咨询)|立即(购买|咨询)|"
+    r"厂家直销|源头厂家|爱采购"
+)
+BANED_SITES = [
+    "taobao.com",
+    "tmall.com",
+    "jd.com",
+    "pinduoduo.com",
+    "1688.com"
+]
+
 
 class UrlResolveStatus(str, Enum):
     SKIPPED = "skipped"      # 不需要解析
@@ -164,7 +175,8 @@ class BaiduSearch:
         # return msg
 
         for r in results:
-            # print("url_status",r.get("url_status"))
+            if r.get("url_status") == UrlResolveStatus.FAILED.value:
+                print("url_status failed:", r.get("url"))
             r.pop("url_status", None)
         return json.dumps(results, ensure_ascii=False)
 
