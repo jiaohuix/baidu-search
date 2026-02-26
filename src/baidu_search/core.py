@@ -164,7 +164,7 @@ class BaiduSearch:
         # return msg
 
         for r in results:
-            print("url_status",r.get("url_status"))
+            # print("url_status",r.get("url_status"))
             r.pop("url_status", None)
         return json.dumps(results, ensure_ascii=False)
 

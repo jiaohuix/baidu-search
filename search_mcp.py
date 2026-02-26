@@ -9,7 +9,7 @@ example:
 curl "http://127.0.0.1:8080/resolve_cite?cite=cite://abc123"
 curl "http://127.0.0.1:8080/resolve_cite?cites=cite://a1,cite://b2,cite://c3"
 
-{"cite":"cite://mp.weixin.qq.com/bd13621488","real":"https://mp.weixin.qq.com/s?__biz=MzA3"
+{"cite":"cite://mp.weixin.qq.com/bd13621488","real":"https://mp.weixin.qq.com/s?__biz=MzA3"}
 
 """
 
