@@ -1,29 +1,27 @@
 """
 CrawlEngine - 统一网页抓取引擎
 
-代价分级: requests(L0) < crawl4ai(L1) < jina(L2)
-- level=0: 仅 requests，失败就放弃
-- level=1: requests 失败后 fallback 到 crawl4ai
-- level=2: requests -> crawl4ai -> jina，逐级升级
+代价分级: httpx(L0) < crawl4ai(L1) < jina(L2)
+- level=0: 仅 httpx，失败就放弃
+- level=1: httpx 失败后 fallback 到 crawl4ai
+- level=2: httpx -> crawl4ai -> jina，逐级升级
 
 用法:
     engine = CrawlEngine(level=1)
     text = await engine.crawl(url)
-TODO:
-1 像search一样添加cache √
-2 异步与同步混用改掉
-_crawl_requests 用的是同步 sync_requests.get，但 crawl() 是 async，可能导致线程阻塞。
 
-可以考虑用 httpx.AsyncClient 或 aiohttp 完全异步化。
+已完成:
+1. 添加 cache √
+2. 完全异步化，使用 httpx.AsyncClient 替代 sync requests √
+3. HTML 解析放到线程池避免阻塞 event loop √
 """
 
 import os
 import re
 import time
 import logging
+import asyncio
 from typing import Optional
-
-import requests as sync_requests
 
 from baidu_search.cache import get_crawl_cache
 
@@ -47,6 +45,12 @@ except ImportError:
     pass
 
 try:
+    import chardet
+    _HAS_CHARDET = True
+except ImportError:
+    _HAS_CHARDET = False
+
+try:
     from readability import Document as ReadabilityDoc
     from markdownify import markdownify as md_convert
     from bs4 import BeautifulSoup
@@ -62,6 +66,13 @@ _JS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# 反爬虫/验证码检测
+_ANTI_BOT_PATTERN = re.compile(
+    r'验证码|请开启JavaScript|访问过于频繁|人机验证|'
+    r'verify|captcha|forbidden|access denied|cloudflare',
+    re.IGNORECASE,
+)
+
 
 def _is_bad_content(text: str, status_code: int = 200) -> bool:
     """判断抓取内容是否无效"""
@@ -69,6 +80,12 @@ def _is_bad_content(text: str, status_code: int = 200) -> bool:
         return True
     if not text or len(text.strip()) < 50:
         return True
+
+    # 检测反爬虫/验证码
+    if _ANTI_BOT_PATTERN.search(text):
+        logger.debug("[内容检测] 触发反爬虫/验证码")
+        return True
+
     js_hits = len(_JS_PATTERN.findall(text))
     plain = re.sub(r'<[^>]+>', '', text).strip()
     if len(plain) < 100 and js_hits > 5:
@@ -78,8 +95,8 @@ def _is_bad_content(text: str, status_code: int = 200) -> bool:
     return False
 
 
-def _html_to_markdown(html: str) -> str:
-    """用 readability + markdownify 提取正文转 markdown"""
+def _html_to_markdown_sync(html: str) -> str:
+    """用 readability + markdownify 提取正文转 markdown（同步版本，需在线程池调用）"""
     if not _HAS_READABILITY:
         return re.sub(r'<[^>]+>', '', html).strip()
     doc = ReadabilityDoc(html)
@@ -88,6 +105,12 @@ def _html_to_markdown(html: str) -> str:
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
     return md_convert(str(soup), heading_style="ATX").strip()
+
+
+async def _html_to_markdown(html: str) -> str:
+    """异步版本：在线程池中执行 HTML 解析，避免阻塞 event loop"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _html_to_markdown_sync, html)
 
 
 def enhance_markdown_structure(md_text: str) -> str:
@@ -196,22 +219,72 @@ class CrawlEngine:
             chain.append(("jina", self._crawl_jina))
         return chain
 
-    # ── L0: requests ──
+    # ── L0: httpx (异步) ──
     async def _crawl_requests(self, url: str) -> Optional[str]:
+        if not _HAS_HTTPX:
+            logger.warning("[httpx] httpx 未安装，跳过")
+            return None
         try:
-            resp = sync_requests.get(
-                url, headers=self._HEADERS, timeout=self.timeout, allow_redirects=True,
-            )
-            if _is_bad_content(resp.text, resp.status_code):
-                return None
-            if self.use_readability and _HAS_READABILITY:
-                content = _html_to_markdown(resp.text)
-                content = enhance_markdown_structure(content)
-                return content
-            # 简单去标签
-            return re.sub(r'<[^>]+>', '', resp.text).strip()
+            async with httpx.AsyncClient(follow_redirects=True, timeout=self.timeout) as client:
+                resp = await client.get(url, headers=self._HEADERS)
+
+                # 智能编码检测，避免乱码
+                content = resp.content  # 原始 bytes
+
+                # 1. 优先使用响应头的编码
+                encoding = resp.encoding
+                logger.debug(f"[编码] 响应头编码: {encoding}")
+
+                # 2. 如果响应头没有或不可靠，尝试从 HTML meta 标签提取
+                if not encoding or encoding == "ISO-8859-1":
+                    # 从 HTML 中查找 charset
+                    import re as re_module
+                    charset_match = re_module.search(
+                        rb'<meta[^>]+charset=["\']?([^"\'>\s]+)',
+                        content[:2048],  # 只检查前 2KB
+                        re_module.IGNORECASE
+                    )
+                    if charset_match:
+                        encoding = charset_match.group(1).decode('ascii', errors='ignore')
+                        logger.debug(f"[编码] HTML meta 编码: {encoding}")
+
+                # 3. 降级到 chardet 自动检测（如果安装了）
+                if not encoding or encoding == "ISO-8859-1":
+                    if _HAS_CHARDET:
+                        import chardet
+                        detected = chardet.detect(content[:10000])  # 检测前 10KB
+                        if detected and detected.get('confidence', 0) > 0.7:
+                            encoding = detected['encoding']
+                            logger.info(f"[编码] chardet 检测: {encoding} (置信度: {detected.get('confidence'):.2f})")
+
+                # 4. 最终降级到 UTF-8
+                if not encoding:
+                    encoding = "utf-8"
+
+                logger.info(f"[编码] 最终使用: {encoding}")
+
+                # 解码
+                try:
+                    text = content.decode(encoding, errors="replace")  # replace 比 ignore 更安全
+                except (LookupError, TypeError) as e:
+                    logger.warning(f"[编码] {encoding} 解码失败: {e}，降级到 utf-8")
+                    text = content.decode("utf-8", errors="replace")
+
+                logger.debug(f"[内容] 解码后长度: {len(text)} 字符，前100字符: {text[:100]}")
+
+                # 检测内容质量（包含反爬虫检测）
+                if _is_bad_content(text, resp.status_code):
+                    logger.info(f"[httpx] 内容无效或触发反爬虫，升级到下一级: {url[:80]}")
+                    return None
+
+                if self.use_readability and _HAS_READABILITY:
+                    content = await _html_to_markdown(text)
+                    content = enhance_markdown_structure(content)
+                    return content
+                # 简单去标签
+                return re.sub(r'<[^>]+>', '', text).strip()
         except Exception as e:
-            logger.warning(f"[requests] {e}")
+            logger.warning(f"[httpx] {e}")
             return None
 
     # ── L1: crawl4ai ──
@@ -247,15 +320,20 @@ class CrawlEngine:
 
 
 async def main():
+    # 设置日志级别为 INFO 以查看详细信息
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
     # engine = CrawlEngine(level=0)
-    engine = CrawlEngine(level=1)
+    engine = CrawlEngine(level=2)  # 使用 level=2 测试所有后端
     print(f"可用后端: {engine.available_backends()}")
 
     url = "https://www.dayi.org.cn/qa/286155.html"
     url = "https://zhuanlan.zhihu.com/p/56592867" # 动态
+    url = "https://baijiahao.baidu.com/s?id=1850641902495454566&wfr=spider&for=pc"
     text = await engine.crawl(url)
     if text:
-        print(text)
+        print(text[:10000])  # 只打印前 500 字符
+        print(f"\n... (总长度: {len(text)} 字符)")
     else:
         print("抓取失败")
 

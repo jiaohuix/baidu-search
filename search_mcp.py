@@ -89,8 +89,42 @@ url_memory = URLMemory()  # URL 映射存储
 
 
 def err(msg: str) -> str:
-    """统一错误返回 JSON"""
-    return json.dumps({"error": msg}, ensure_ascii=False)
+    """
+    统一错误返回 JSON。
+    自动提取核心错误信息，避免返回冗长 traceback。
+    """
+    import re
+
+    if not msg:
+        return json.dumps({"error": "unknown_error"}, ensure_ascii=False)
+
+    # 1️⃣ 去掉多余换行
+    msg = msg.replace("\n", " ").strip()
+
+    # 2️⃣ 常见超时
+    if "Timeout" in msg or "timed out" in msg.lower():
+        core = "timeout"
+
+    # 3️⃣ 连接错误
+    elif "Connection" in msg or "ConnectError" in msg:
+        core = "connection_error"
+
+    # 4️⃣ HTTP 状态码
+    elif "403" in msg:
+        core = "http_403"
+    elif "404" in msg:
+        core = "http_404"
+
+    # 5️⃣ 取消异常
+    elif "CancelledError" in msg:
+        core = "cancelled"
+
+    else:
+        # 6️⃣ 截断超长错误
+        core = msg[:120]
+
+    return json.dumps({"error": core}, ensure_ascii=False)
+
 
 
 # ============ HTTP 路由 ============
