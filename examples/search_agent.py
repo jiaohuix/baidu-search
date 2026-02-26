@@ -36,7 +36,7 @@ Always prioritize accuracy and cite information from the pages you accessed when
 db = SqliteDb(db_file="tmp/agents.db")
 
 async def main():
-    # Connect to your Baidu search MCP server
+    # Connect to your search MCP server
     mcp_tools = MCPTools(
         transport="streamable-http",
         url="http://127.0.0.1:8080/mcp"
@@ -56,7 +56,8 @@ async def main():
             debug_mode=True,
             debug_level=2,
         )
-
+        query = "深度调研这篇论文的具体创新点是什么，如何理解，STAR: Similarity-guided Teacher-Assisted Refinement for Super-Tiny Function Calling Models"
+        await agent.aprint_response(query, stream=True)
         query = "GLM5编程能力如何"
         await agent.aprint_response(query, stream=True)
         query = "读取网页内容https://zhuanlan.zhihu.com/p/56592867"

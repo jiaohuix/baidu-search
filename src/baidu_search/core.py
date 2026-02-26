@@ -18,6 +18,7 @@ TODO：
 """
 
 import re
+import json
 import asyncio
 import logging
 import random
@@ -33,8 +34,19 @@ from baidu_search.cache import async_cache, get_search_cache, get_url_cache
 
 logger = logging.getLogger(__name__)
 
-NOISE_PATTERNS  = r"高清视频|在线观看|实时回复|精选笔记|淘宝"
-BANED_SITES = ["www.taobao.com"]
+NOISE_PATTERNS = (
+    r"高清视频|在线观看|实时回复|精选笔记|"
+    r"点击(查看|咨询)|立即(购买|咨询)|"
+    r"厂家直销|源头厂家|爱采购"
+)
+BANED_SITES = [
+    "taobao.com",
+    "tmall.com",
+    "jd.com",
+    "pinduoduo.com",
+    "1688.com"
+]
+
 
 class UrlResolveStatus(str, Enum):
     SKIPPED = "skipped"      # 不需要解析
@@ -44,8 +56,8 @@ class UrlResolveStatus(str, Enum):
 
 class ContentFilter:
     def __init__(self, banned_sites=None, noise_patterns=None):
-        self.banned_sites = banned_sites or []
-        self.re_noise = re.compile(noise_patterns) if noise_patterns else None
+        self.banned_sites = banned_sites or BANED_SITES
+        self.re_noise = re.compile(noise_patterns) if noise_patterns else re.compile(NOISE_PATTERNS)
 
     def _is_banned_site(self, url: str) -> bool:
         netloc = urlparse(url).netloc
@@ -153,14 +165,20 @@ class BaiduSearch:
             results = res["data"][:num_results]
 
         # format
-        formatted_results = []
-        for i, r in enumerate(results, 1):
-            formatted_results.append(f"{i}. {r['title']} ({r['url']})")
-            if "abstract" in r:
-                formatted_results[-1] += f"\nAbstract: {r['abstract']}"
+        # formatted_results = []
+        # for i, r in enumerate(results, 1):
+        #     formatted_results.append(f"{i}. {r['title']} ({r['url']})")
+        #     if "abstract" in r:
+        #         formatted_results[-1] += f"\nAbstract: {r['abstract']}"
 
-        msg = "\n".join(formatted_results)
-        return msg
+        # msg = "\n".join(formatted_results)
+        # return msg
+
+        for r in results:
+            if r.get("url_status") == UrlResolveStatus.FAILED.value:
+                print("url_status failed:", r.get("url"))
+            r.pop("url_status", None)
+        return json.dumps(results, ensure_ascii=False)
 
 
     async def search_baidu(self, query, num_results=10):
@@ -430,8 +448,8 @@ async def main():
     searcher = BaiduSearch(config)
     keyword = "强化学习"
     print(f"开始抓取关键词: {keyword} ...")
-    # results = await searcher.search(keyword, num_results=10)
-    # print(results)
+    results = await searcher.search(keyword, num_results=10)
+    print(results)
     
     results = await searcher.search_baidu(keyword, num_results=10)
     for item in results["data"]:

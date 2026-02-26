@@ -39,6 +39,7 @@ class AsyncCacheManager:
 
     # ── SQLite 初始化 ──────────────────────────────────────
     def _init_db(self):
+        """同步初始化，仅在构造函数调用一次"""
         if not self._db_path:
             return
 
@@ -68,9 +69,10 @@ class AsyncCacheManager:
             logger.debug(f"[cache hit/mem] {key[:60]}")
             return entry["value"]
 
-        # 再查 SQLite
+        # 再查 SQLite（放到线程池避免阻塞）
         if self._db_path:
-            row = self._db_get(key)
+            loop = asyncio.get_event_loop()
+            row = await loop.run_in_executor(None, self._db_get, key)
             if row and self._is_valid(row[1], effective_ttl):
                 value = json.loads(row[0])
                 # 回填内存
@@ -88,7 +90,9 @@ class AsyncCacheManager:
             ts = time.time()
             self._memory[key] = {"value": value, "ts": ts}
             if self._db_path:
-                self._db_set(key, value, ts)
+                # SQLite 写入放到线程池避免阻塞
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self._db_set, key, value, ts)
             logger.debug(f"[cache set] {key[:60]}")
 
     async def clear_expired(self):
