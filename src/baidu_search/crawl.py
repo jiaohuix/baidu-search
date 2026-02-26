@@ -95,15 +95,45 @@ def _is_bad_content(text: str, status_code: int = 200) -> bool:
     return False
 
 
+def _clean_html_noise(html: str) -> str:
+    """结构化过滤：在 HTML 阶段就移除噪声标签（同步，需在线程池调用）"""
+    if not _HAS_READABILITY:
+        return html
+
+    soup = BeautifulSoup(html, "lxml")
+
+    # 1. 移除噪声标签（导航、页脚、侧边栏、脚本、样式）
+    noise_tags = ["script", "style", "noscript", "nav", "footer", "aside", "header"]
+    for tag in soup(noise_tags):
+        tag.decompose()
+
+    # 2. 移除常见广告/推荐容器（通过 class/id 启发式匹配）
+    ad_patterns = re.compile(r'ad|advertisement|banner|promo|recommend|related|sidebar', re.I)
+    for tag in soup.find_all(attrs={"class": ad_patterns}):
+        tag.decompose()
+    for tag in soup.find_all(attrs={"id": ad_patterns}):
+        tag.decompose()
+
+    return str(soup)
+
+
 def _html_to_markdown_sync(html: str) -> str:
     """用 readability + markdownify 提取正文转 markdown（同步版本，需在线程池调用）"""
     if not _HAS_READABILITY:
         return re.sub(r'<[^>]+>', '', html).strip()
+
+    # 先清洗 HTML 噪声
+    html = _clean_html_noise(html)
+
+    # 再用 readability 提取主内容
     doc = ReadabilityDoc(html)
     main_html = doc.summary(html_partial=True)
     soup = BeautifulSoup(main_html, "lxml")
+
+    # 二次清理（防止 readability 遗漏）
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
+
     return md_convert(str(soup), heading_style="ATX").strip()
 
 
@@ -111,6 +141,113 @@ async def _html_to_markdown(html: str) -> str:
     """异步版本：在线程池中执行 HTML 解析，避免阻塞 event loop"""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _html_to_markdown_sync, html)
+
+
+
+def clean_web_noise(md_text: str, link_density_threshold: float = 0.4) -> str:
+    """
+    通用网页噪声清洗：结合链接密度、启发式规则、区域截断
+
+    Args:
+        md_text: Markdown 格式的文本
+        link_density_threshold: 链接密度阈值（0-1），超过则判定为导航/推荐区
+
+    Returns:
+        清洗后的文本
+    """
+    if not md_text:
+        return ""
+
+    # ── 预处理：移除残留的 HTML 标签（防御性） ──
+    text = re.sub(r"<script.*?>.*?</script>", "", md_text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<style.*?>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+
+    lines = text.split("\n")
+    cleaned = []
+
+    # ── 噪声关键词（中英文通用） ──
+    noise_patterns = re.compile(
+        r'icon_|登录|注册|首页|搜索|分享|收藏|关注|点赞|评论|举报|反馈|'
+        r'到百度首页|百度首页|百度APP|下载|立即|查看更多|展开|收起|'
+        r'作者最新文章|相关推荐|热门推荐|猜你喜欢|为您推荐|'
+        r'京公网安备|ICP备|版权所有|Copyright|All Rights Reserved|'
+        r'login|register|sign in|sign up|share|subscribe|follow|'
+        r'^\[!\[|^\[\]\(|^!\[|^\*\*\s*$|'  # 空链接、空图片、空粗体
+        r'^\d+阅读$|^\d+\s*阅读$|^\d+\s*views?$|'  # "12阅读" / "12 views"
+        r'^热$|^新$|^荐$|^hot$|^new$',  # 单字标签
+        re.IGNORECASE
+    )
+
+    # ── 区域截断标记（检测到后丢弃后续所有内容） ──
+    in_noise_section = False
+    noise_section_markers = re.compile(
+        r'^#+\s*(作者最新文章|相关推荐|热门推荐|猜你喜欢|为您推荐|'
+        r'related articles?|recommended|you may also like|more from)',
+        re.IGNORECASE
+    )
+
+    for line in lines:
+        stripped = line.strip()
+
+        # ── 规则 1: 区域截断（最高优先级） ──
+        if noise_section_markers.search(stripped):
+            in_noise_section = True
+            continue
+
+        if in_noise_section:
+            continue
+
+        # ── 规则 2: 保留空行（维持段落结构） ──
+        if not stripped:
+            cleaned.append(line)
+            continue
+
+        # ── 规则 3: 基础长度过滤 ──
+        # 保留标题（以 # 开头），其他行至少 5 字符
+        if len(stripped) < 5 and not re.match(r'^#+\s', stripped):
+            continue
+
+        # ── 规则 4: 链接密度过滤 ──
+        # 计算 Markdown 链接占比：[text](url)
+        links = re.findall(r"\[(.*?)\]\(.*?\)", stripped)
+        link_text_len = sum(len(l) for l in links)
+        total_len = len(stripped)
+
+        density = link_text_len / total_len if total_len > 0 else 0
+        if density > link_density_threshold:
+            continue  # 链接密度过高，判定为导航/推荐区
+
+        # ── 规则 5: 关键词噪声过滤 ──
+        if noise_patterns.search(stripped):
+            continue
+
+        # ── 规则 6: 特殊格式过滤 ──
+        # 跳过纯数字链接行（如 "- 1[美用技术...]"）
+        if re.match(r'^-?\s*\d+\[', stripped):
+            continue
+
+        # ── 规则 7: 清理 Markdown 格式噪声 ──
+        # 移除图片: ![alt](url)
+        cleaned_line = re.sub(r"!\[.*?\]\(.*?\)", "", stripped)
+        # 将链接转换为纯文本: [text](url) -> text
+        cleaned_line = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", cleaned_line)
+        # 移除孤立 URL
+        cleaned_line = re.sub(r"https?://\S+", "", cleaned_line)
+        # 移除 Markdown 格式符号（可选，保留结构）
+        # cleaned_line = re.sub(r"[*_>]", "", cleaned_line)
+
+        cleaned_line = cleaned_line.strip()
+
+        # ── 规则 8: 二次长度检查 ──
+        if len(cleaned_line) >= 10 or re.match(r'^#+\s', cleaned_line):
+            cleaned.append(cleaned_line)
+
+    # ── 后处理：压缩多余空行 ──
+    result = "\n".join(cleaned)
+    result = re.sub(r"\n{3,}", "\n\n", result)  # 最多保留 2 个连续换行
+
+    return result.strip()
 
 
 def enhance_markdown_structure(md_text: str) -> str:
@@ -293,7 +430,12 @@ class CrawlEngine:
             return None
         async with AsyncWebCrawler() as crawler:
             result = await crawler.arun(url=url)
-            return result.markdown if result and result.markdown else None
+            if result and result.markdown:
+                # 对 crawl4ai 的输出也应用清洗
+                cleaned = clean_web_noise(result.markdown)
+                cleaned = enhance_markdown_structure(cleaned)
+                return cleaned
+            return None
 
     # ── L2: jina ──
     async def _crawl_jina(self, url: str) -> Optional[str]:
