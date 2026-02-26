@@ -56,8 +56,8 @@ class UrlResolveStatus(str, Enum):
 
 class ContentFilter:
     def __init__(self, banned_sites=None, noise_patterns=None):
-        self.banned_sites = banned_sites or []
-        self.re_noise = re.compile(noise_patterns) if noise_patterns else None
+        self.banned_sites = banned_sites or BANED_SITES
+        self.re_noise = re.compile(noise_patterns) if noise_patterns else re.compile(NOISE_PATTERNS)
 
     def _is_banned_site(self, url: str) -> bool:
         netloc = urlparse(url).netloc
