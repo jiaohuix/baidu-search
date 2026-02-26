@@ -1,6 +1,6 @@
 """
 MCP Server for baidu-search
-增强版：鲁棒抓取 + URL 虚拟化
+增强版：鲁棒抓取 + URL 虚拟化 + 内容压缩优化
 - 将长 URL 压缩为 cite://{domain}/{hash} 格式
 - 在工具层维护短链与真实 URL 的映射
 - 提供 HTTP API 查询真实 URL
@@ -18,7 +18,7 @@ import json
 import argparse
 import hashlib
 from urllib.parse import urlparse
-from typing import List, Literal, Dict, Optional
+from typing import List, Dict, Optional
 
 from fastmcp import FastMCP
 from starlette.requests import Request
@@ -30,16 +30,31 @@ from baidu_search import BaiduSearch, CrawlEngine, ContextCompressor
 # ============ URL 虚拟化模块 ============
 
 class URLMemory:
-    """URL 映射存储，维护虚拟 URL 与真实 URL 的双向映射"""
+    """URL 映射存储，维护虚拟 URL 与真实 URL 的双向映射，并记录搜索意图"""
 
     def __init__(self):
         self.cite_to_real: Dict[str, str] = {}  # cite:// -> real URL
         self.real_to_cite: Dict[str, str] = {}  # real URL -> cite://
+        self.cite_to_keywords: Dict[str, List[str]] = {}  # cite:// -> [keywords]
 
-    def add(self, real_url: str, cite_url: str):
-        """添加映射"""
+    def add(self, real_url: str, cite_url: str, keywords: Optional[str] = None):
+        """
+        添加映射
+
+        Args:
+            real_url: 真实 URL
+            cite_url: 虚拟 URL
+            keywords: 搜索关键词（可选）
+        """
         self.cite_to_real[cite_url] = real_url
         self.real_to_cite[real_url] = cite_url
+
+        # 记录搜索关键词
+        if keywords:
+            if cite_url not in self.cite_to_keywords:
+                self.cite_to_keywords[cite_url] = []
+            if keywords not in self.cite_to_keywords[cite_url]:
+                self.cite_to_keywords[cite_url].append(keywords)
 
     def get_real(self, cite_url: str) -> Optional[str]:
         """通过虚拟 URL 获取真实 URL"""
@@ -48,6 +63,16 @@ class URLMemory:
     def get_cite(self, real_url: str) -> Optional[str]:
         """通过真实 URL 获取虚拟 URL"""
         return self.real_to_cite.get(real_url)
+
+    def get_keywords(self, cite_url: str) -> Optional[str]:
+        """
+        获取 cite:// URL 关联的搜索关键词
+
+        Returns:
+            最近一次的搜索关键词，如果有多个则返回最后一个
+        """
+        keywords_list = self.cite_to_keywords.get(cite_url, [])
+        return keywords_list[-1] if keywords_list else None
 
     def exists(self, cite_url: str) -> bool:
         """检查虚拟 URL 是否存在"""
@@ -85,42 +110,28 @@ def is_cite_url(url: str) -> bool:
 mcp = FastMCP(name="search_mcp")
 searcher = BaiduSearch()
 crawl_engine = CrawlEngine(level=2)
+compressor = ContextCompressor(splitter="jina")  # 全局压缩器
 url_memory = URLMemory()  # URL 映射存储
 
 
 def err(msg: str) -> str:
-    """
-    统一错误返回 JSON。
-    自动提取核心错误信息，避免返回冗长 traceback。
-    """
-    import re
-
+    """统一错误返回 JSON，自动提取核心错误信息"""
     if not msg:
         return json.dumps({"error": "unknown_error"}, ensure_ascii=False)
 
-    # 1️⃣ 去掉多余换行
     msg = msg.replace("\n", " ").strip()
 
-    # 2️⃣ 常见超时
     if "Timeout" in msg or "timed out" in msg.lower():
         core = "timeout"
-
-    # 3️⃣ 连接错误
     elif "Connection" in msg or "ConnectError" in msg:
         core = "connection_error"
-
-    # 4️⃣ HTTP 状态码
     elif "403" in msg:
         core = "http_403"
     elif "404" in msg:
         core = "http_404"
-
-    # 5️⃣ 取消异常
     elif "CancelledError" in msg:
         core = "cancelled"
-
     else:
-        # 6️⃣ 截断超长错误
         core = msg[:120]
 
     return json.dumps({"error": core}, ensure_ascii=False)
@@ -130,7 +141,7 @@ def err(msg: str) -> str:
 # ============ HTTP 路由 ============
 
 @mcp.custom_route("/health", methods=["GET"])
-async def health_check(request: Request) -> JSONResponse:
+async def health_check(_: Request) -> JSONResponse:
     """健康检查"""
     return JSONResponse({"status": "ok"})
 
@@ -200,14 +211,14 @@ async def search_baidu(query: str, num_results: int = 10) -> str:
         # 解析搜索结果
         results = json.loads(result_str)
 
-        # URL 虚拟化
+        # URL 虚拟化并记录搜索意图
         for item in results:
             real_url = item.get("url", "")
             if real_url and not is_cite_url(real_url):
                 # 生成虚拟 URL
                 cite_url = generate_cite_url(real_url)
-                # 存储映射
-                url_memory.add(real_url, cite_url)
+                # 存储映射并关联搜索关键词
+                url_memory.add(real_url, cite_url, keywords=query)
                 # 替换为虚拟 URL
                 item["url"] = cite_url
 
@@ -218,50 +229,38 @@ async def search_baidu(query: str, num_results: int = 10) -> str:
 
 
 @mcp.tool(name="fetch_content")
-async def fetch_content(
-    url: str,
-    mode: Literal["full", "head", "tail", "grep", "compress"] = "full",
-    n: int = 1000,
-    keyword: str = "",
-    query: str = ""
-) -> str:
+async def fetch_content(url: str, n: int = 2000, query: str = "") -> str:
     """
-    功能：
-        抓取网页正文，并根据模式处理内容，返回 JSON 字符串。
-        支持虚拟 URL (cite://) 和真实 URL (http/https)。
+    抓取网页正文并进行上下文压缩。
+    支持虚拟 URL (cite://) 和真实 URL (http/https)。
 
     参数：
-        url: 网页链接，支持：
-            - cite:// 虚拟引用 URL（自动转换为真实 URL）
-            - http/https 真实 URL
-        mode: 操作模式，可选：
-            - full: 返回全文（截断至 n 字符）
-            - head: 返回前 n 字符
-            - tail: 返回后 n 字符
-            - grep: 返回包含 keyword 的段落，最多 n 字符
-            - compress: 使用 ContextCompressor 对文本进行 query-aware 压缩
+        url: 网页链接
+            - cite:// 虚拟 URL（自动转换，无需传 query）
+            - http/https 真实 URL（可选传 query）
         n: 最大返回字符数
-        keyword: grep 模式下使用的关键词
-        query: compress 模式下使用的查询上下文
+        query: 压缩关键词（可选）
+            - cite:// URL 自动使用搜索词
+            - http:// URL 可选传入
 
     返回：
-        JSON 字符串：
-        {
-            "text": str,       # 返回的文本
-            "orig_len": int,   # 原始文本长度
-            "ret_len": int     # 返回文本长度
-        }
-        如果抓取或处理失败，则返回：
-        {"error": "错误信息"}
+        JSON 字符串
     """
-    # 处理虚拟 URL
+    # 处理虚拟 URL 并获取关键词
     real_url = url
-    if is_cite_url(url):
+    is_cite = is_cite_url(url)
+
+    if is_cite:
         resolved = url_memory.get_real(url)
         if not resolved:
             return err(f"cite_not_found: {url}")
         real_url = resolved
 
+        # cite:// URL 自动获取搜索关键词
+        if not query:
+            query = url_memory.get_keywords(url) or ""
+
+    # 抓取网页内容
     try:
         text = await crawl_engine.crawl(real_url)
     except Exception as e:
@@ -278,24 +277,17 @@ async def fetch_content(
 
     orig_len = len(text)
 
+    # 上下文压缩
     try:
-        if mode == "head":
-            result = text[:n]
-        elif mode == "tail":
-            result = text[-n:]
-        elif mode == "grep":
-            paras = text.split("\n")
-            hits = [p for p in paras if keyword in p]
-            result = "\n".join(hits)[:n]
-        elif mode == "compress":
-            compressor = ContextCompressor(max_chars=n)
-            result = compressor.compress(query=query, context=text)
-        else:  # full
+        if query:
+            result = compressor.compress(query=query, context=text, max_chars=n)
+        else:
             result = text[:n]
     except Exception as e:
-        return err(f"process_failed: {e}")
+        return err(f"compress_failed: {e}")
 
-    data = {"text": result, "orig_len": orig_len, "ret_len": len(result)}
+    ratio = round(len(result) / orig_len, 2) if orig_len > 0 else 1.0
+    data = {"text": result, "ratio": ratio}
     return json.dumps(data, ensure_ascii=False)
 
 

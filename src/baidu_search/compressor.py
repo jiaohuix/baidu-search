@@ -76,7 +76,6 @@ class ContextCompressor:
     """基于 BM25 的上下文压缩器。
 
     Args:
-        max_chars: 压缩后最大字符数，默认 2000
         max_input_chars: 输入文本截断长度，防止超长文本，默认 50000
         min_sentence_len: 最短句子长度，过滤碎片，默认 10
         splitter: 分句模式，"simple"(默认) 或 "jina"
@@ -84,22 +83,21 @@ class ContextCompressor:
 
     def __init__(
         self,
-        max_chars: int = 2000,
         max_input_chars: int = 50000,
         min_sentence_len: int = 10,
         splitter: Literal["simple", "jina"] = "simple",
     ) -> None:
-        self.max_chars = max_chars
         self.max_input_chars = max_input_chars
         self.min_sentence_len = min_sentence_len
         self.splitter = splitter
 
-    def compress(self, query: str, context: str) -> str:
+    def compress(self, query: str, context: str, max_chars: int = 2000) -> str:
         """压缩上下文，返回与 query 最相关的文本片段。
 
         Args:
             query: 搜索查询词（可以是 title + abstract 拼接）
             context: 爬取的网页全文
+            max_chars: 压缩后最大字符数，默认 2000
 
         Returns:
             压缩后的文本，长度不超过 max_chars
@@ -109,7 +107,7 @@ class ContextCompressor:
 
         context = context[:self.max_input_chars]
 
-        if len(context) <= self.max_chars:
+        if len(context) <= max_chars:
             return context
 
         # 1. 分句 + 过滤（带缓存）
@@ -117,7 +115,7 @@ class ContextCompressor:
             _split_and_filter(context, self.min_sentence_len, self.splitter)
         )
         if not sentences:
-            return context[:self.max_chars]
+            return context[:max_chars]
 
         # 2. BM25 打分
         scores = self._bm25_score(query, sentences)
@@ -131,7 +129,7 @@ class ContextCompressor:
         total_chars = 0
         for idx in sorted_indices:
             sent_len = len(sentences[idx])
-            if total_chars + sent_len > self.max_chars and selected:
+            if total_chars + sent_len > max_chars and selected:
                 break
             selected.append(idx)
             total_chars += sent_len

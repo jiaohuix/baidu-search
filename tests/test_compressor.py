@@ -86,9 +86,10 @@ text = clean_web_noise(text)
 print(f"噪声清楚后文长度: {len(text)}")
 
 for max_chars in [500, 1000,1500, 2000]:
-    comp = ContextCompressor(max_chars=max_chars, splitter="simple")
-    # comp = ContextCompressor(max_chars=max_chars, splitter="jina")
-    result = comp.compress(query, text)
+    comp = ContextCompressor( splitter="simple")
+    # comp = ContextCompressor(splitter="jina")
+    result = comp.compress(query, text, max_chars=max_chars)
+
     print(f"\n[max_chars={max_chars}] 压缩后长度: {len(result)}")
     print(f"压缩率: {len(result)/len(text):.1%}")
     # print(f"内容预览: {result[:200]}...")
