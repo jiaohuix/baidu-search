@@ -193,15 +193,13 @@ async def search_baidu(query: str, num_results: int = 5) -> str:
     """
     功能：
         Web 搜索工具，用于根据关键词在网络上检索相关信息。
-        返回的 URL 已虚拟化为 cite:// 协议，大幅降低 token 占用。
 
     参数：
-        query:str 搜索关键词
+        query:str 搜索关键词,空格分隔且勿加双引号
         num_results:int 返回结果数量，默认 5
 
     返回：
         str (JSON 格式字符串): [{"rank":int,"title":str, "abstract":str, "url": str}]
-        其中 url 为虚拟引用格式: cite://{domain}/{hash}
     """
     try:
         result_str = await searcher.search(query, num_results=num_results)
@@ -229,7 +227,7 @@ async def search_baidu(query: str, num_results: int = 5) -> str:
 
 
 @mcp.tool(name="fetch_content")
-async def fetch_content(url: str, n: int = 2000, query: str = "") -> str:
+async def fetch_content(url: str, n: int = 500, query: str = "") -> str:
     """
     抓取网页正文并进行上下文压缩。
     支持虚拟 URL (cite://) 和真实 URL (http/https)。
