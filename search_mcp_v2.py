@@ -189,7 +189,7 @@ async def resolve_cite(request: Request) -> JSONResponse:
 # ============ MCP 工具 ============
 
 @mcp.tool(name="web_search")
-async def search_baidu(query: str, num_results: int = 10) -> str:
+async def search_baidu(query: str, num_results: int = 5) -> str:
     """
     功能：
         Web 搜索工具，用于根据关键词在网络上检索相关信息。
@@ -197,7 +197,7 @@ async def search_baidu(query: str, num_results: int = 10) -> str:
 
     参数：
         query:str 搜索关键词
-        num_results:int 返回结果数量，默认 10
+        num_results:int 返回结果数量，默认 5
 
     返回：
         str (JSON 格式字符串): [{"rank":int,"title":str, "abstract":str, "url": str}]
