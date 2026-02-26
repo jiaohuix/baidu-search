@@ -92,6 +92,11 @@ def inject_citation_urls(
 
     print(f"[post_hook] url_map = {url_map}")
 
+    # 关键：把 run_context 的数据同步回 agent.session_state
+    if agent.session_state is not None:
+        agent.session_state["url_map"] = url_map
+
+
     if not run_output.content or not url_map:
         return
 
