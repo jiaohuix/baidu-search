@@ -68,7 +68,7 @@ _JS_PATTERN = re.compile(
 
 # 反爬虫/验证码检测
 _ANTI_BOT_PATTERN = re.compile(
-    r'验证码|请开启JavaScript|访问过于频繁|人机验证|'
+    r'验证码|请开启JavaScript|访问过于频繁|人机验证|环境异常|完成验证'
     r'verify|captcha|forbidden|access denied|cloudflare',
     re.IGNORECASE,
 )
@@ -332,10 +332,10 @@ class CrawlEngine:
             try:
                 text = await fn(url)
                 elapsed = time.time() - start
-                if text:
+                if text and not _is_bad_content(text, 200):  # 再次验证内容质量
                     logger.info(f"[crawl] {name} 成功: {url[:80]} | ✓ | ⏱: {elapsed:.2f}s")
                     result = text[:self.max_chars]
-                    # ── 写缓存 ──
+                    # ── 写缓存（只缓存有效内容）──
                     await cache.set(cache_key, result)
                     return result
                 else:
@@ -465,6 +465,13 @@ async def main():
     # 设置日志级别为 INFO 以查看详细信息
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
+    # 清除缓存以测试新的反爬虫检测逻辑
+    # import os
+    # cache_file = ".cache/crawl.db"
+    # if os.path.exists(cache_file):
+    #     os.remove(cache_file)
+    #     print(f"已删除缓存文件: {cache_file}")
+
     # engine = CrawlEngine(level=0)
     engine = CrawlEngine(level=2)  # 使用 level=2 测试所有后端
     print(f"可用后端: {engine.available_backends()}")
@@ -472,6 +479,8 @@ async def main():
     url = "https://www.dayi.org.cn/qa/286155.html"
     url = "https://zhuanlan.zhihu.com/p/56592867" # 动态
     url = "https://baijiahao.baidu.com/s?id=1850641902495454566&wfr=spider&for=pc"
+    url = "https://mp.weixin.qq.com/s?__biz=MzA5OTg0MzgzOQ==&mid=2247518674&idx=1&sn=cd7a35ca06b6b0f1f6166d41c837659b&chksm=9190f5ca03c8e53244ba6826f60ba29c7dfa0e07349eeeff500dd1a3bde2095227b409a41db7&scene=27"
+
     text = await engine.crawl(url)
     if text:
         print(text[:10000])  # 只打印前 500 字符
