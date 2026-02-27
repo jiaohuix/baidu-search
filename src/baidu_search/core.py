@@ -158,13 +158,13 @@ class BaiduSearch:
 
         Args:
             query: 搜索关键词
-            offset: 偏移量，从第几条开始返回（基于过滤后的结果）
+            offset: 偏移量，从第几条开始返回（基于原始数据）
             limit: 返回结果数量
 
         Returns:
             JSON 字符串
         """
-        # ⭐ 直接查询原始数据，不做预估
+        # ⭐ 不多查，直接查询需要的数据
         res = await self.search_baidu(query, offset=offset, limit=limit)
 
         # ⭐ 统一过滤
@@ -198,7 +198,7 @@ class BaiduSearch:
             results = res["data"]
 
         # ⭐ 统一编号（业务层排序）
-        for idx, item in enumerate(results, start=1):
+        for idx, item in enumerate(results, start=offset + 1):
             item["rank"] = idx
 
         return json.dumps(results, ensure_ascii=False)
@@ -286,7 +286,8 @@ class BaiduSearch:
                 all_results.extend(new_results)
 
         # ── 按 rank 排序并切片返回 ──
-        all_results.sort(key=lambda x: x.get("rank", 0))
+        # 注意：fetch_page() 不再返回 rank 字段，保持原始顺序即可
+        # all_results 已经按页码顺序排列，无需排序
 
         # ⭐ 修复：使用相对偏移而不是取模
         # all_results 只包含 pages_needed 的数据，需要计算相对偏移
