@@ -107,7 +107,6 @@ DEFAULT_CONCURRENCY = {
     "max_retries": 2,
     "retry_backoff": 3.0,
     "resolve_real_url": True,
-    # "resolve_real_url": False,
 }
 
 
@@ -140,8 +139,8 @@ class BaiduSearch:
         self._resolve_sem = asyncio.Semaphore(cc["resolve_sem"])
         self._resolve_qps = self._make_limiter(cc["resolve_qps"])
         self._cooldown_until = 0
-        # 是否解析真实url
-        self.resolve_real_url = cc.get("resolve_real_url", True)
+        # ⭐ 是否解析真实 URL（可通过 config 或 concurrency 配置）
+        self.resolve_real_url = config.get("resolve_real_url", cc.get("resolve_real_url", True))
 
     @staticmethod
     def _make_limiter(qps: float) -> AsyncLimiter:
@@ -508,6 +507,7 @@ async def main():
 
             # 是否解析真实 URL
             "resolve_real_url": True,
+            # "resolve_real_url": False,
         }
     }
     searcher = BaiduSearch(config)
