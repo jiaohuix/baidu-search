@@ -116,10 +116,15 @@ class AsyncCacheManager:
 
     def _db_get(self, key: str):
         with sqlite3.connect(self._db_path) as conn:
-            row = conn.execute(
-                "SELECT value, timestamp FROM cache WHERE key = ?", (key,)
-            ).fetchone()
-            return row
+            try:
+                row = conn.execute(
+                    "SELECT value, timestamp FROM cache WHERE key = ?", (key,)
+                ).fetchone()
+                return row
+            except sqlite3.OperationalError:
+                # 表不存在，重新初始化
+                self._init_db()
+                return None
 
     def _db_set(self, key: str, value: Any, ts: float):
         with sqlite3.connect(self._db_path) as conn:
