@@ -154,93 +154,159 @@ class BaiduSearch:
             # 反转：1 次 / (1/qps) 秒
             return AsyncLimiter(1, 1.0 / qps)
 
-    async def search(self, query: str, num_results: int = 5) -> str:
-        """搜索百度并返回结果"""
-        res = await self.search_baidu(query, num_results=num_results)
+    async def search(self, query: str, offset: int = 0, limit: int = 10) -> str:
+        """搜索百度并返回结果（支持分页）
 
-        # filter
+        Args:
+            query: 搜索关键词
+            offset: 偏移量，从第几条开始返回（基于过滤后的结果）
+            limit: 返回结果数量
+
+        Returns:
+            JSON 字符串
+        """
+        # ⭐ 直接查询原始数据，不做预估
+        res = await self.search_baidu(query, offset=offset, limit=limit)
+
+        # ⭐ 统一过滤
         if self.content_filter:
-            results = self.content_filter.filter_results(res["data"], num_results)
+            filtered = []
+            seen_urls = set()
+            for item in res["data"]:
+                url = item.get("url") or ""
+                title = item.get("title", "")
+                abstract = item.get("abstract", "")
+
+                # 跳过条件
+                if (
+                    not url.startswith("http") or
+                    url in seen_urls or
+                    self.content_filter._is_banned_site(url) or
+                    (self.content_filter.re_noise and
+                     (self.content_filter.re_noise.search(title) or
+                      self.content_filter.re_noise.search(abstract)))
+                ):
+                    continue
+
+                seen_urls.add(url)
+                item.pop("url_status", None)
+                filtered.append(item)
+
+            results = filtered
         else:
-            results = res["data"][:num_results]
+            for r in res["data"]:
+                r.pop("url_status", None)
+            results = res["data"]
 
-        # format
-        # formatted_results = []
-        # for i, r in enumerate(results, 1):
-        #     formatted_results.append(f"{i}. {r['title']} ({r['url']})")
-        #     if "abstract" in r:
-        #         formatted_results[-1] += f"\nAbstract: {r['abstract']}"
+        # ⭐ 统一编号（业务层排序）
+        for idx, item in enumerate(results, start=1):
+            item["rank"] = idx
 
-        # msg = "\n".join(formatted_results)
-        # return msg
-
-        for r in results:
-            if r.get("url_status") == UrlResolveStatus.FAILED.value:
-                print("url_status failed:", r.get("url"))
-            r.pop("url_status", None)
         return json.dumps(results, ensure_ascii=False)
 
 
-    async def search_baidu(self, query, num_results=10):
-        """百度搜索主流程。
-        思路：sem + qps 两层控制即可，低频调用零等待，高频自动排队。
-        缓存：query + num_results 级别，命中直接返回。
+    async def search_baidu(self, query: str, offset: int = 0, limit: int = 10):
+        """百度搜索主流程（支持分页）。
+
+        ⭐ Segment Cache 策略（行业标准）：
+        - 按页缓存原始数据：search:{query}:page:{page_idx}
+        - 每页固定 10 条（百度搜索引擎原生结构）
+        - 缓存未过滤的原始数据，保证每页完整性
+        - 过滤逻辑在上层 search() 统一执行
+
+        示例：
+        - offset=0, limit=8   → 查询 page:0，缓存 10 条原始数据，返回 [0:8]
+        - offset=5, limit=8   → 命中 page:0，查询 page:1，返回 [5:13]
+        - offset=50, limit=5  → 命中 page:5，返回 [50:55]
+
+        Args:
+            query: 搜索关键词
+            offset: 偏移量
+            limit: 返回结果数量
+
+        Returns:
+            {"data": [...]}  # 原始数据，未过滤
         """
-        # ── query 级缓存 ──
-        cache_key = f"search:{query}:{num_results}"
-        cached = await get_search_cache().get(cache_key)
-        if cached is not None:
-            logger.info(f"[cache hit] search_baidu: {query!r}")
-            return cached
+        PAGE_SIZE = 10  # 百度每页固定 10 条
 
-        pages_needed = (num_results + 9) // 10
-        t0 = time.time()
+        # 计算需要的页范围
+        start_page = offset // PAGE_SIZE
+        end_page = (offset + limit - 1) // PAGE_SIZE
+        pages_needed = list(range(start_page, end_page + 1))
 
-        # http2=True + 固定 headers 在 client 级别
-        async with httpx.AsyncClient(headers=self._HEADERS, http2=True) as client:
-            t1 = time.time()
-            logger.info(f"[计时] 初始化 {t1-t0:.2f}s")
+        # ── 尝试从缓存中获取各页数据 ──
+        _search_cache = get_search_cache()
+        all_results = []
+        pages_to_fetch = []
 
-            # ② 搜索页：gather 并发，sem + qps 自动限速
-            results = await self._fetch_pages_concurrent(client, query, pages_needed)
-            t2 = time.time()
-            logger.info(f"[计时] 搜索页 {pages_needed} 页 → {len(results)} 条，{t2-t1:.2f}s")
-
-            # ③ link 解析：gather 并发，sem + qps 自动限速
-            if self.resolve_real_url:
-                await self._resolve_urls_concurrent(client, results)
-                t3 = time.time()
-                logger.info(f"[计时] URL 解析 {len(results)} 条，{t3-t2:.2f}s")
+        for page_idx in pages_needed:
+            cache_key = f"search:{query}:page:{page_idx}"
+            cached = await _search_cache.get(cache_key)
+            if cached is not None:
+                logger.info(f"[cache hit] page={page_idx}")
+                all_results.extend(cached)
             else:
-                # 标记为跳过解析
-                for item in results:
-                    item["url_status"] = UrlResolveStatus.SKIPPED.value
-                t3 = time.time()
-                logger.info(f"[计时] URL 解析已关闭")
+                pages_to_fetch.append(page_idx)
 
-            # ④ 降级保留
-            cleaned = [
-                item for item in results
-                if item.get("url_status") != UrlResolveStatus.FAILED.value
-                or item.get("url", "").startswith("http")
-            ]
-            if not cleaned:
-                logger.warning(f"URL 全部解析失败: {query}，返回原始结果")
-                cleaned = results
+        # ── 查询缺失的页 ──
+        if pages_to_fetch:
+            t0 = time.time()
+            async with httpx.AsyncClient(headers=self._HEADERS, http2=True) as client:
+                t1 = time.time()
+                logger.info(f"[计时] 初始化 {t1-t0:.2f}s")
 
-            logger.info(f"[计时] 总耗时 {t3-t0:.2f}s，返回 {len(cleaned)} 条")
-            result = {"data": cleaned}
+                # 并发抓取缺失的页
+                new_results = await self._fetch_pages_concurrent(client, query, pages_to_fetch)
+                t2 = time.time()
+                logger.info(f"[计时] 搜索页 {len(pages_to_fetch)} 页 → {len(new_results)} 条，{t2-t1:.2f}s")
 
-            # ── 写入 query 级缓存 ──
-            await get_search_cache().set(cache_key, result)
-            return result
+                # URL 解析
+                if self.resolve_real_url:
+                    await self._resolve_urls_concurrent(client, new_results)
+                    t3 = time.time()
+                    logger.info(f"[计时] URL 解析 {len(new_results)} 条，{t3-t2:.2f}s")
+                else:
+                    for item in new_results:
+                        item["url_status"] = UrlResolveStatus.SKIPPED.value
+                    t3 = time.time()
+
+                logger.info(f"[计时] 总耗时 {t3-t0:.2f}s，获取 {len(new_results)} 条")
+
+                # ⭐ 按页缓存原始数据（未过滤，保证每页完整 10 条）
+                # 简化：按查询顺序分配到各页
+                for idx, page_idx in enumerate(pages_to_fetch):
+                    start_idx = idx * PAGE_SIZE
+                    end_idx = start_idx + PAGE_SIZE
+                    page_data = new_results[start_idx:end_idx]
+
+                    if page_data:
+                        cache_key = f"search:{query}:page:{page_idx}"
+                        await _search_cache.set(cache_key, page_data)
+                        logger.info(f"[cache set] page={page_idx}, {len(page_data)} 条（原始数据）")
+
+                all_results.extend(new_results)
+
+        # ── 按 rank 排序并切片返回 ──
+        all_results.sort(key=lambda x: x.get("rank", 0))
+
+        # ⭐ 修复：使用相对偏移而不是取模
+        # all_results 只包含 pages_needed 的数据，需要计算相对偏移
+        start_idx = offset - start_page * PAGE_SIZE
+        end_idx = start_idx + limit
+        data = all_results[start_idx:end_idx]
+
+        return {"data": data}
 
     # ── 搜索页：并发抓取 ─────────────────────────────────────
     async def _fetch_pages_concurrent(self, client, query, pages_needed):
-        """所有页 gather 并发，由 sem + qps 自动控制节奏。"""
+        """所有页 gather 并发，由 sem + qps 自动控制节奏。
+
+        Args:
+            pages_needed: 需要抓取的页索引列表，例如 [0, 1, 2] 或 [5, 6]
+        """
         tasks = [
-            asyncio.create_task(self._fetch_page_throttled(client, query, i))
-            for i in range(pages_needed)
+            asyncio.create_task(self._fetch_page_throttled(client, query, page_idx))
+            for page_idx in pages_needed
         ]
         pages = await asyncio.gather(*tasks)
         # 合并结果，跳过被拦截的页（None）
@@ -397,7 +463,7 @@ class BaiduSearch:
             containers = soup.select(".c-container")
             
             page_items = []
-            for i, container in enumerate(containers):
+            for container in containers:
                 title_node = container.select_one("h3") or container.select_one(".t")
                 if not title_node: continue
                 
@@ -409,7 +475,6 @@ class BaiduSearch:
                 clean_abs = self.clean_abstract(raw_abstract)
 
                 page_items.append({
-                    "rank": page_idx * 10 + i + 1,
                     "title": title,
                     "abstract": clean_abs,
                     "url": raw_url
@@ -448,15 +513,36 @@ async def main():
     searcher = BaiduSearch(config)
     keyword = "强化学习"
     print(f"开始抓取关键词: {keyword} ...")
-    results = await searcher.search(keyword, num_results=10)
-    print(results)
-    
-    results = await searcher.search_baidu(keyword, num_results=10)
-    for item in results["data"]:
-        print(f"[{item['rank']}] {item['title']}")
-        print(f"来源/地址: {item['url']}")
-        print(f"内容摘要: {item['abstract']}")
-        print("-" * 40)
+
+    # 测试分页功能
+    print("\n=== 第一次查询：offset=0, limit=10（会查询 page:0 和 page:1）===")
+    t0 = time.time()
+    results = await searcher.search(keyword, offset=0, limit=10)
+    print("results",results)
+    t1 = time.time()
+    print(f"耗时: {t1-t0:.3f}s")
+    print(f"返回 {len(json.loads(results))} 条结果")
+
+    print("\n=== 第二次查询：offset=0, limit=5（应该命中缓存 page:0）===")
+    t0 = time.time()
+    results = await searcher.search(keyword, offset=0, limit=5)
+    t1 = time.time()
+    print(f"耗时: {t1-t0:.3f}s（应该 < 0.1s）")
+    print(f"返回 {len(json.loads(results))} 条结果")
+
+    print("\n=== 第三次查询：offset=5, limit=5（应该命中缓存 page:0）===")
+    t0 = time.time()
+    results = await searcher.search(keyword, offset=5, limit=5)
+    t1 = time.time()
+    print(f"耗时: {t1-t0:.3f}s（应该 < 0.1s）")
+    print(f"返回 {len(json.loads(results))} 条结果")
+
+    print("\n=== 第四次查询：offset=10, limit=5（应该命中缓存 page:1）===")
+    t0 = time.time()
+    results = await searcher.search(keyword, offset=10, limit=5)
+    t1 = time.time()
+    print(f"耗时: {t1-t0:.3f}s（应该 < 0.1s）")
+    print(f"返回 {len(json.loads(results))} 条结果")
 
 
 

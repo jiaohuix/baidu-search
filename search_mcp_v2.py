@@ -189,20 +189,26 @@ async def resolve_cite(request: Request) -> JSONResponse:
 # ============ MCP 工具 ============
 
 @mcp.tool(name="web_search")
-async def search_baidu(query: str, num_results: int = 5) -> str:
+async def search_baidu(query: str, offset: int = 0, limit: int = 10) -> str:
     """
     功能：
         Web 搜索工具，用于根据关键词在网络上检索相关信息。
+        支持分页查询，提升模型阅读能力。
 
     参数：
         query:str 搜索关键词,空格分隔且勿加双引号
-        num_results:int 返回结果数量，默认 5
+        offset:int 偏移量，从第几条开始返回，默认 0
+        limit:int 返回结果数量，默认 10
 
     返回：
         str (JSON 格式字符串): [{"rank":int,"title":str, "abstract":str, "url": str}]
+
+    示例：
+        - offset=0, limit=5: 返回前 5 条
+        - offset=5, limit=5: 返回第 6-10 条
     """
     try:
-        result_str = await searcher.search(query, num_results=num_results)
+        result_str = await searcher.search(query, offset=offset, limit=limit)
         if not result_str:
             return err("search no_results")
 
