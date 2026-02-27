@@ -192,8 +192,7 @@ async def resolve_cite(request: Request) -> JSONResponse:
 async def search_baidu(query: str, offset: int = 0, limit: int = 10) -> str:
     """
     功能：
-        Web 搜索工具，用于根据关键词在网络上检索相关信息。
-        支持分页查询，提升模型阅读能力。
+        Web 搜索工具，用于根据关键词在网络上检索相关信息,支持分页查询。
 
     参数：
         query:str 搜索关键词,空格分隔且勿加双引号
