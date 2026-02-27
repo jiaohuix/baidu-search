@@ -84,7 +84,7 @@ def is_cite_url(url: str) -> bool:
 
 mcp = FastMCP(name="search_mcp")
 searcher = BaiduSearch()
-crawl_engine = CrawlEngine(level=2)
+crawl_engine = CrawlEngine(level=0)
 url_memory = URLMemory()  # URL 映射存储
 
 

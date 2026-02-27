@@ -2,12 +2,12 @@
 CrawlEngine - 统一网页抓取引擎
 
 代价分级: httpx(L0) < crawl4ai(L1) < jina(L2)
-- level=0: 仅 httpx，失败就放弃
-- level=1: httpx 失败后 fallback 到 crawl4ai
-- level=2: httpx -> crawl4ai -> jina，逐级升级
+- level=0: 从 httpx 开始，失败后逐级升级到 crawl4ai -> jina
+- level=1: 从 crawl4ai 开始，失败后升级到 jina
+- level=2: 直接使用 jina（最高代价）
 
 用法:
-    engine = CrawlEngine(level=1)
+    engine = CrawlEngine(level=1)  # 直接用 crawl4ai
     text = await engine.crawl(url)
 
 已完成:
@@ -348,12 +348,27 @@ class CrawlEngine:
         return None
 
     def _build_chain(self) -> list:
-        """根据 level 和可用性构建 fallback 链"""
-        chain = [("requests", self._crawl_requests)]
-        if self.level >= 1 and _HAS_CRAWL4AI:
-            chain.append(("crawl4ai", self._crawl_crawl4ai))
-        if self.level >= 2 and _HAS_HTTPX:
-            chain.append(("jina", self._crawl_jina))
+        """
+        根据 level 构建 fallback 链:
+        - level=0: requests -> crawl4ai -> jina
+        - level=1: crawl4ai -> jina
+        - level=2: jina
+        """
+        chain = []
+        if self.level == 0:
+            chain.append(("requests", self._crawl_requests))
+            if _HAS_CRAWL4AI:
+                chain.append(("crawl4ai", self._crawl_crawl4ai))
+            if _HAS_HTTPX:
+                chain.append(("jina", self._crawl_jina))
+        elif self.level == 1:
+            if _HAS_CRAWL4AI:
+                chain.append(("crawl4ai", self._crawl_crawl4ai))
+            if _HAS_HTTPX:
+                chain.append(("jina", self._crawl_jina))
+        elif self.level == 2:
+            if _HAS_HTTPX:
+                chain.append(("jina", self._crawl_jina))
         return chain
 
     # ── L0: httpx (异步) ──
@@ -445,7 +460,7 @@ class CrawlEngine:
         if self.jina_api_key:
             headers["Authorization"] = f"Bearer {self.jina_api_key}"
         target = f"https://r.jina.ai/{url}"
-        async with httpx.AsyncClient(http2=True, timeout=30.0) as client:
+        async with httpx.AsyncClient(http2=True, timeout=self.timeout) as client:
             resp = await client.get(target, headers=headers, follow_redirects=True)
             resp.raise_for_status()
             return resp.text if resp.text else None
@@ -473,13 +488,13 @@ async def main():
     #     print(f"已删除缓存文件: {cache_file}")
 
     # engine = CrawlEngine(level=0)
-    engine = CrawlEngine(level=2)  # 使用 level=2 测试所有后端
+    engine = CrawlEngine(level=1)  # 使用 level=2 测试所有后端
     print(f"可用后端: {engine.available_backends()}")
 
     url = "https://www.dayi.org.cn/qa/286155.html"
     url = "https://zhuanlan.zhihu.com/p/56592867" # 动态
-    url = "https://baijiahao.baidu.com/s?id=1850641902495454566&wfr=spider&for=pc"
-    url = "https://mp.weixin.qq.com/s?__biz=MzA5OTg0MzgzOQ==&mid=2247518674&idx=1&sn=cd7a35ca06b6b0f1f6166d41c837659b&chksm=9190f5ca03c8e53244ba6826f60ba29c7dfa0e07349eeeff500dd1a3bde2095227b409a41db7&scene=27"
+    # url = "https://baijiahao.baidu.com/s?id=1850641902495454566&wfr=spider&for=pc"
+    # url = "https://mp.weixin.qq.com/s?__biz=MzA5OTg0MzgzOQ==&mid=2247518674&idx=1&sn=cd7a35ca06b6b0f1f6166d41c837659b&chksm=9190f5ca03c8e53244ba6826f60ba29c7dfa0e07349eeeff500dd1a3bde2095227b409a41db7&scene=27"
 
     text = await engine.crawl(url)
     if text:
