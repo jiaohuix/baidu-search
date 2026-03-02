@@ -18,7 +18,8 @@ import json
 import argparse
 import hashlib
 from urllib.parse import urlparse
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional,Union
+import asyncio
 
 from fastmcp import FastMCP
 from starlette.requests import Request
@@ -231,67 +232,130 @@ async def search_baidu(query: str, offset: int = 0, limit: int = 10) -> str:
         return err(f"search_failed: {e}")
 
 
+# @mcp.tool(name="fetch_content")
+# async def fetch_content(url: str, n: int = 500, query: str = "") -> str:
+#     """
+#     抓取网页正文并进行上下文压缩。
+#     支持虚拟 URL (cite://) 和真实 URL (http/https)。
+
+#     参数：
+#         url: 网页链接
+#             - cite:// 虚拟 URL（自动转换，无需传 query）
+#             - http/https 真实 URL（可选传 query）
+#         n: 最大返回字符数
+#         query: 压缩关键词（可选）
+#             - cite:// URL 自动使用搜索词
+#             - http:// URL 可选传入
+
+#     返回：
+#         JSON 字符串
+#     """
+#     # 处理虚拟 URL 并获取关键词
+#     real_url = url
+#     is_cite = is_cite_url(url)
+
+#     if is_cite:
+#         resolved = url_memory.get_real(url)
+#         if not resolved:
+#             return err(f"cite_not_found: {url}")
+#         real_url = resolved
+
+#         # cite:// URL 自动获取搜索关键词
+#         if not query:
+#             query = url_memory.get_keywords(url) or ""
+
+#     # 抓取网页内容
+#     try:
+#         text = await crawl_engine.crawl(real_url)
+#     except Exception as e:
+#         return err(f"crawl_failed: {e}")
+
+#     if not text:
+#         return err("empty_page")
+
+#     if isinstance(text, bytes):
+#         try:
+#             text = text.decode("utf-8", "ignore")
+#         except Exception:
+#             return err("decode_failed")
+
+#     orig_len = len(text)
+
+#     # 上下文压缩
+#     try:
+#         if query:
+#             result = compressor.compress(query=query, context=text, max_chars=n)
+#         else:
+#             result = text[:n]
+#     except Exception as e:
+#         return err(f"compress_failed: {e}")
+
+#     ratio = round(len(result) / orig_len, 2) if orig_len > 0 else 1.0
+#     data = {"text": result, "ratio": ratio}
+#     return json.dumps(data, ensure_ascii=False)
+
 @mcp.tool(name="fetch_content")
-async def fetch_content(url: str, n: int = 500, query: str = "") -> str:
+async def fetch_multiple_contents(
+    urls: List[str],  # 强制使用 List，去掉 Union
+    n: int = 500, 
+    query: str = ""
+) -> str:
     """
-    抓取网页正文并进行上下文压缩。
-    支持虚拟 URL (cite://) 和真实 URL (http/https)。
-
+    批量抓取并对比多个网页内容。
+    
+    当你从搜索结果中获得多个相关链接时，请务必通过此工具一次性传入所有 URL 列表。
+    
     参数：
-        url: 网页链接
-            - cite:// 虚拟 URL（自动转换，无需传 query）
-            - http/https 真实 URL（可选传 query）
-        n: 最大返回字符数
-        query: 压缩关键词（可选）
-            - cite:// URL 自动使用搜索词
-            - http:// URL 可选传入
-
-    返回：
-        JSON 字符串
+        urls: 必须是一个包含多个 URL 的字符串列表。例如：["https://a.com", "https://b.com"]
+        n: 每个网页压缩后的最大字符数，默认为 500。
+        query: 统一的压缩关键词，工具会根据此词在所有网页中提取最相关的片段。
     """
-    # 处理虚拟 URL 并获取关键词
-    real_url = url
-    is_cite = is_cite_url(url)
 
-    if is_cite:
-        resolved = url_memory.get_real(url)
-        if not resolved:
-            return err(f"cite_not_found: {url}")
-        real_url = resolved
+    # 定义单任务处理函数
+    async def process_single_url(url: str) -> Dict:
+        real_url = url
+        current_query = query
+        
+        # 1. 处理虚拟 URL 逻辑
+        if is_cite_url(url):
+            resolved = url_memory.get_real(url)
+            if not resolved:
+                return {"url": url, "error": "cite_not_found"}
+            real_url = resolved
+            if not current_query:
+                current_query = url_memory.get_keywords(url) or ""
 
-        # cite:// URL 自动获取搜索关键词
-        if not query:
-            query = url_memory.get_keywords(url) or ""
-
-    # 抓取网页内容
-    try:
-        text = await crawl_engine.crawl(real_url)
-    except Exception as e:
-        return err(f"crawl_failed: {e}")
-
-    if not text:
-        return err("empty_page")
-
-    if isinstance(text, bytes):
+        # 2. 抓取内容
         try:
-            text = text.decode("utf-8", "ignore")
-        except Exception:
-            return err("decode_failed")
+            text = await crawl_engine.crawl(real_url)
+            if not text:
+                return {"url": url, "error": "empty_page"}
+            
+            if isinstance(text, bytes):
+                text = text.decode("utf-8", "ignore")
+        except Exception as e:
+            return {"url": url, "error": f"crawl_failed: {str(e)}"}
 
-    orig_len = len(text)
+        # 3. 压缩内容
+        orig_len = len(text)
+        try:
+            if current_query:
+                result = compressor.compress(query=current_query, context=text, max_chars=n)
+            else:
+                result = text[:n]
+        except Exception as e:
+            return {"url": url, "error": f"compress_failed: {str(e)}"}
 
-    # 上下文压缩
-    try:
-        if query:
-            result = compressor.compress(query=query, context=text, max_chars=n)
-        else:
-            result = text[:n]
-    except Exception as e:
-        return err(f"compress_failed: {e}")
+        ratio = round(len(result) / orig_len, 2) if orig_len > 0 else 1.0
+        return {"url": url, "text": result, "ratio": ratio}
 
-    ratio = round(len(result) / orig_len, 2) if orig_len > 0 else 1.0
-    data = {"text": result, "ratio": ratio}
-    return json.dumps(data, ensure_ascii=False)
+    # --- 并发执行核心逻辑 ---
+    # 使用 asyncio.gather 同时发起请求，不再一个一个排队
+    tasks = [process_single_url(u) for u in urls]
+    results = await asyncio.gather(*tasks)
+
+    # 封装最终结果
+    return json.dumps(results, ensure_ascii=False)
 
 
 # --- 启动 MCP Server ---
