@@ -193,7 +193,8 @@ async def search_baidu(query: str, num_results: int = 10) -> str:
         其中 url 为虚拟引用格式: cite://{domain}/{hash}
     """
     try:
-        result_str = await searcher.search(query, num_results=num_results)
+        # 兼容旧接口：num_results 转换为 offset=0, limit=num_results
+        result_str = await searcher.search(query, offset=0, limit=num_results)
         if not result_str:
             return err("search no_results")
 
