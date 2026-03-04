@@ -64,7 +64,6 @@ def _split_and_filter(
     text: str, min_len: int, splitter: str,
 ) -> tuple[str, ...]:
     """分句 + 过滤噪声和碎片，带缓存。"""
-    print("splitter",splitter)
     chunks = _split_simple(text) if splitter == "simple" else _split_jina(text)
     return tuple(
         c for c in chunks

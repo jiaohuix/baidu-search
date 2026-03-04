@@ -2,11 +2,13 @@ from .cache import AsyncCacheManager, async_cache, get_search_cache, get_url_cac
 from .core import BaiduSearch, ContentFilter, UrlResolveStatus
 from .crawl import CrawlEngine
 from .compressor import ContextCompressor
+from .ctx_engine import ContextEngine
 
 __all__ = [
     "BaiduSearch", "ContentFilter", "UrlResolveStatus",
     "AsyncCacheManager", "async_cache", "get_search_cache", "get_url_cache", "get_crawl_cache",
     "CrawlEngine",
     "ContextCompressor",
+    "ContextEngine"
 ]
 
