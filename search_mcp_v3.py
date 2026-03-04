@@ -41,7 +41,9 @@ USE_HIGHLIGHT = True
 RERANK_MODEL = "Qwen3-Reranker-0.6B"
 HIGHLIGHT_MODEL = "semantic-highlight-bilingual-v1"
 # 高亮窗口大小
-HIGHLIGHT_WINDOW_SIZE = 1
+# HIGHLIGHT_WINDOW_SIZE = 1
+HIGHLIGHT_WINDOW_SIZE = 2
+
 
 # ============ URL 虚拟化模块 ============
 
